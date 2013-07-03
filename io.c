@@ -230,8 +230,8 @@ PMCW    pmcw;                           /* Path management ctl word  */
 
     /* Condition code 1 if subchannel is status pending
        with other than intermediate status */
-    if ((dev->scsw.flag3 & SCSW3_SC_PEND)
-      && !(dev->scsw.flag3 & SCSW3_SC_INTER))
+    if (scsw_status_pending(&dev->scsw) &&
+        !scsw_intermediate_status(&dev->scsw))
     {
         PTIO(ERR,"*MSCH");
         regs->psw.cc = 1;
@@ -240,7 +240,7 @@ PMCW    pmcw;                           /* Path management ctl word  */
     }
 
     /* Condition code 2 if subchannel is busy */
-    if (dev->busy || IOPENDING(dev))
+    if (subchannel_busy(dev))
     {
         PTIO(ERR,"*MSCH");
         regs->psw.cc = 2;
@@ -726,14 +726,9 @@ SCHIB   schib;                          /* Subchannel information blk*/
 
     /* Build the subchannel information block */
     schib.pmcw = dev->pmcw;
-
     obtain_lock (&dev->lock);
-    if (dev->pciscsw.flag3 & SCSW3_SC_PEND)
-        schib.scsw = dev->pciscsw;
-    else
-        schib.scsw = dev->scsw;
+    schib.scsw = *scsw_select(dev);
     release_lock (&dev->lock);
-
     memset (schib.moddep, 0, sizeof(schib.moddep));
 
     /* Store the subchannel information block */

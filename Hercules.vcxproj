@@ -750,6 +750,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="chain.h" />
+    <ClInclude Include="channel.h" />
     <ClInclude Include="cnsllogo.h" />
     <ClInclude Include="crypto\aes.h" />
     <ClInclude Include="crypto\des.h" />

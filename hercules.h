@@ -109,6 +109,7 @@
 #include "version.h"
 
 #include "esa390.h"       // (ESA/390 structure definitions)
+#include "channel.h"      // Channel definitions
 #include "hscutl.h"       // (utility functions)
 #include "w32util.h"      // (win32 porting functions)
 #include "clock.h"        // (TOD definitions)
@@ -141,7 +142,9 @@
 #include "msgenu.h"       // (Hercules messages)
 
 // Post-process includes
+#define  __Post_Process_Includes__
 #include "dasdtab.h"
 #include "hinlines.h"     // bring Hercules specific inlines here
+#include "channel.h"      // Channel inlines
 
 #endif // _HERCULES_H

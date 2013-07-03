@@ -968,6 +968,7 @@ do { \
 #define HHC01318 "%1d:%04X CHAN: test I/O: cc=%d"
 #define HHC01320 "%1d:%04X CHAN: start I/O S/370 conversion to asynchronous operation started"
 #define HHC01321 "%1d:%04X CHAN: start I/O S/370 conversion to asynchronous operation successful"
+#define HHC01322 "%1d:%04X CHAN: start I/O orb=%8.8llX %8.8llX %8.8llX"
 #define HHC01329 "%1d:%04X CHAN: halt I/O"
 #define HHC01330 "%1d:%04X CHAN: HIO modification executed: cc=1"
 #define HHC01331 "%1d:%04X CHAN: clear subchannel"

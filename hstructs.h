@@ -1179,10 +1179,7 @@ struct DEVBLK {                         /* Device configuration block*/
                 tschpending:1;          /* 1=TSCH required to clear  */
                                         /*   pending interrupt       */
 #define IOPENDING(_dev)         \
-        ((_dev)->pending     || \
-         (_dev)->pcipending  || \
-         (_dev)->attnpending || \
-         (_dev)->tschpending)
+        subchannel_status_pending(_dev)
 #define INITIAL_POWERON_370() \
     ( !sysblk.ipled && ARCH_370 == sysblk.arch_mode )
 #ifdef OPTION_SYNCIO

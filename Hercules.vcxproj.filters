@@ -619,13 +619,13 @@
       <Filter>Source Files\Hercules\Emulation\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hRexx.c">
-      <Filter>Source Files\Hercules\Rexx\Source Files</Filter>
+      <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hRexx_o.c">
-      <Filter>Source Files\Hercules\Rexx\Source Files</Filter>
+      <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hRexx_r.c">
-      <Filter>Source Files\Hercules\Rexx\Source Files</Filter>
+      <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -906,12 +906,6 @@
       <Filter>Other Files\Build\msvc\makefile includes</Filter>
     </None>
     <None Include="msvc.makefile.includes\HERC_FLAGS.msvc">
-      <Filter>Other Files\Build\msvc\makefile includes</Filter>
-    </None>
-    <None Include="msvc.makefile.includes\HQA_DIR.msvc">
-      <Filter>Other Files\Build\msvc\makefile includes</Filter>
-    </None>
-    <None Include="msvc.makefile.includes\HQA_FLAGS.msvc">
       <Filter>Other Files\Build\msvc\makefile includes</Filter>
     </None>
     <None Include="msvc.makefile.includes\MOD_RULES1.msvc">
@@ -1480,12 +1474,6 @@
     <ClInclude Include="hostopts.h">
       <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="hqadefs.h">
-      <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="hqainc.h">
-      <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="hscutl.h">
       <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
@@ -1558,9 +1546,6 @@
     <ClInclude Include="sr.h">
       <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="targetver.h">
-      <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="version.h">
       <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
@@ -1582,14 +1567,13 @@
     <ClInclude Include="extstring.h">
       <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="hRexx.h">
-      <Filter>Source Files\Hercules\Rexx\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="hRexxapi.h">
-      <Filter>Source Files\Hercules\Rexx\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="cnsllogo.h">
       <Filter>Source Files\Hercules\Devices\Con/Disp/Term\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hRexx.h" />
+    <ClInclude Include="hRexxapi.h" />
+    <ClInclude Include="channel.h">
+      <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

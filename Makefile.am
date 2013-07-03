@@ -695,6 +695,7 @@ noinst_HEADERS = hostinfo.h     \
                  featchk.h      \
                  feature.h      \
                  esa390.h       \
+                 channel.h      \
                  opcode.h       \
                  clock.h        \
                  hercules.h     \

@@ -50,62 +50,21 @@
 
 
 /*-------------------------------------------------------------------*/
+/* External function definitions                                     */
+/*-------------------------------------------------------------------*/
+
+DLL_EXPORT  void*   device_thread (void *arg);
+
+
+/*-------------------------------------------------------------------*/
 /* Internal function definitions                                     */
 /*-------------------------------------------------------------------*/
 
 void                call_execute_ccw_chain (int arch_mode, void* pDevBlk);
-DLL_EXPORT  void*   device_thread (void *arg);
-static int          schedule_ioq (const REGS* regs, DEVBLK* dev);
+void                perform_clear_subchan_locked (DEVBLK*);
+static int          schedule_ioq (const REGS*, DEVBLK*);
 static INLINE void  subchannel_interrupt_queue_cleanup (DEVBLK*);
 int                 test_subchan_locked (REGS*, DEVBLK*, IRB*, IOINT**, SCSW**);
-
-
-#if !defined(CHANNEL_INLINES)
-#define CHANNEL_INLINES
-static INLINE void
-set_subchannel_busy(DEVBLK* dev)
-{
-    dev->busy = 1;
-    dev->scsw.flag3 |= SCSW3_AC_SCHAC | SCSW3_SC_INTER;
-}
-
-static INLINE void
-set_device_busy(DEVBLK* dev)
-{
-    set_subchannel_busy(dev);
-    dev->scsw.flag3 |= SCSW3_AC_DEVAC;
-}
-
-static INLINE void
-clear_subchannel_busy_scsw(SCSW* scsw)
-{
-    scsw->flag3 &= ~(SCSW3_AC_SCHAC |
-                     SCSW3_AC_DEVAC |
-                     SCSW3_SC_INTER);
-}
-
-static INLINE void
-clear_subchannel_busy(DEVBLK* dev)
-{
-    clear_subchannel_busy_scsw(&dev->scsw);
-    dev->startpending = 0;
-    dev->busy = 0;
-}
-
-static INLINE void
-clear_device_busy_scsw(SCSW* scsw)
-{
-    scsw->flag3 &= ~SCSW3_AC_DEVAC;
-}
-
-static INLINE void
-clear_device_busy(DEVBLK* dev)
-{
-    clear_device_busy_scsw(&dev->scsw);
-}
-
-
-#endif /*CHANNEL_INLINES*/
 
 
 /*-------------------------------------------------------------------*/
@@ -193,6 +152,26 @@ iobuf_reallocate (IOBUF *iobuf, const u_int size)
 #endif
 
 
+#if !defined(call_exit)
+#define call_exit(_routine)                                            \
+do                                                                     \
+{                                                                      \
+    if (dev->hnd->##_routine != NULL)                                  \
+    {                                                                  \
+        obtain_lock(&dev->lock);                                       \
+        (dev->hnd->##_routine)(dev);                                   \
+        release_lock(&dev->lock);                                      \
+    }                                                                  \
+} while (0)
+#define call_exit_locked(_routine)                                     \
+do                                                                     \
+{                                                                      \
+    if (dev->hnd->##_routine != NULL)                                  \
+        (dev->hnd->##_routine)(dev);                                   \
+} while (0)
+#endif
+
+
 #if !defined(PREFETCH_STRUCT)
 #define PREFETCH_STRUCT
 
@@ -229,130 +208,49 @@ typedef struct                          /* Prefetch data structure   */
 
 #endif
 
-#ifdef OPTION_IODELAY_KLUDGE
+#if !defined(IODELAY)
+#if defined(OPTION_IODELAY_KLUDGE)
 #define IODELAY(_dev) \
-do { \
-  if (sysblk.iodelay > 0 && (_dev)->devchar[10] == 0x20) \
-    usleep(sysblk.iodelay); \
-} while(0)
+        iodelay(_dev)
+static void INLINE
+iodelay (const DEVBLK* dev)
+{
+    if (sysblk.iodelay > 0 && dev->devchar[10] == 0x20)
+        usleep(sysblk.iodelay);
+}
 #else
 #define IODELAY(_dev)
 #endif
+#endif
 
-#undef CHADDRCHK
-#if defined(FEATURE_ADDRESS_LIMIT_CHECKING)
-#define CHADDRCHK(_addr,_dev)                   \
-  (   ((_addr) > (_dev)->mainlim)               \
-    || (((_dev)->orb.flag5 & ORB5_A)            \
-      && ((((_dev)->pmcw.flag5 & PMCW5_LM_LOW)  \
-        && ((_addr) < sysblk.addrlimval))       \
-      || (((_dev)->pmcw.flag5 & PMCW5_LM_HIGH)  \
-        && ((_addr) >= sysblk.addrlimval)) ) ))
-#else /*!defined(FEATURE_ADDRESS_LIMIT_CHECKING)*/
+#if !defined(CHADDRCHK)
 #define CHADDRCHK(_addr,_dev) \
-        ((_addr) > (_dev)->mainlim)
-#endif /*!defined(FEATURE_ADDRESS_LIMIT_CHECKING)*/
+        chaddrchk((_addr),(_dev))
+static INLINE int
+chaddrchk(const RADR addr, const DEVBLK* dev)
+{
+    return ((addr > dev->mainlim)
+//#if defined(FEATURE_ADDRESS_LIMIT_CHECKING)
+        ||  ((dev->orb.flag5 & ORB5_A) &&
+             (((dev->pmcw.flag5 & PMCW5_LM_LOW) &&
+               (addr < sysblk.addrlimval)) ||
+              ((dev->pmcw.flag5 & PMCW5_LM_HIGH) &&
+               (addr >= sysblk.addrlimval)) ) )
+//#endif /*defined(FEATURE_ADDRESS_LIMIT_CHECKING)*/
+            );
+}
+#endif
 
 #if !defined(_CHANNEL_C)
 #define _CHANNEL_C
-
-
-/*--------------------------------------------------------------------*/
-/*  Inline routines for Conditions and Indications Cleared at the     */
-/*  Subchannel by TEST SUBCHANNEL; use of the routines keep the       */
-/*  logic flow through the table of conditions clean.                 */
-/*                                                                    */
-/*  SA22-7832-09, Figure 14-2, Conditions and Indications Cleared at  */
-/*                the Subchannel by TEST SUBCHANNEL, p. 14-21.        */
-/*                                                                    */
-/*--------------------------------------------------------------------*/
-
-static INLINE void
-scsw_clear_n_C (SCSW* scsw)
-{
-    scsw->flag1 &= ~SCSW1_N;
-}
-
-static INLINE void
-scsw_clear_q_C (SCSW* scsw)
-{
-    scsw->flag2 &= ~SCSW2_Q;
-}
-
-static INLINE void
-scsw_clear_fc_C (SCSW* scsw)
-{
-    scsw->flag2 &= ~SCSW2_FC;
-}
-
-static INLINE void
-scsw_clear_fc_Nc (SCSW* scsw)
-{
-    if (scsw->flag2 & SCSW2_FC_HALT &&
-        scsw->flag3 & SCSW3_AC_SUSP)
-        scsw_clear_fc_C(scsw);
-}
-
-static INLINE void
-scsw_clear_ac_Cp (SCSW* scsw)
-{
-    scsw->flag2 &= ~(SCSW2_AC_RESUM |
-                         SCSW2_AC_START |
-                         SCSW2_AC_HALT  |
-                         SCSW2_AC_CLEAR);
-    scsw->flag3 &= ~SCSW3_AC_SUSP;
-}
-
-static INLINE void
-scsw_clear_ac_Nr (SCSW* scsw)
-{
-    if (scsw->flag2 & SCSW2_FC_START &&
-        scsw->flag3 & SCSW3_AC_SUSP)
-    {
-        if (scsw->flag2 & SCSW2_FC_HALT)
-            scsw_clear_ac_Cp(scsw);
-        else
-        {
-            scsw->flag2 &= ~SCSW2_AC_RESUM;
-            scsw_clear_n_C(scsw);
-        }
-    }
-}
-
-static INLINE void
-scsw_clear_sc_Cs (SCSW* scsw)
-{
-    scsw->flag3 &= ~SCSW3_SC_PEND;
-}
-
-
-/*--------------------------------------------------------------------*/
-/*  AIPSX (dev)                                                       */
-/*                                                                    */
-/*  Generates the AIPSX indication for Figure 16-5, the Deferred-     */
-/*  Condition-Code Meaning for Status-Pending Subchannel, Figure      */
-/*  16-5.                                                             */
-/*--------------------------------------------------------------------*/
-static INLINE U8
-AIPSX (const SCSW* scsw)
-{
-    U8  result =  (scsw->flag1 & SCSW1_A)           /* >> 4 << 4  */
-               | ((scsw->flag1 & SCSW1_I) >> 2      /* >> 5 << 3  */
-               |  (scsw->flag0 & SCSW0_S) >> 2)     /* >> 3 << 1  */
-               | ((scsw->flag1 & SCSW1_P) >> 4)     /* >> 6 << 2  */
-               |  (scsw->flag3 & SCSW3_SC_PEND);    /* >> 0 << 0  */
-    return (result);
-}
-
 
 /*--------------------------------------------------------------------*/
 /*  Queue I/O interrupt and update status (locked)                    */
 /*                                                                    */
 /*  Locks Held on Entry                                               */
-/*    INTLOCK                                                         */
+/*    sysblk.intlock                                                  */
 /*    dev->lock                                                       */
 /*  Locks Held on Return                                              */
-/*    INTLOCK                                                         */
 /*    dev->lock                                                       */
 /*  Locks Used                                                        */
 /*    sysblk.iointqlk                                                 */
@@ -360,14 +258,14 @@ AIPSX (const SCSW* scsw)
 static INLINE void
 queue_io_interrupt_and_update_status_locked(DEVBLK* dev)
 {
+    SCSW*   scsw = &dev->scsw;
+    IOINT*  ioint = &dev->ioint;
+
     /* Get the I/O interrupt queue lock */
     obtain_lock(&sysblk.iointqlk);
 
-    /* Ensure the interrupt is queued/dequeued per pending flag */
-    if (dev->scsw.flag3 & SCSW3_SC_PEND)
-        QUEUE_IO_INTERRUPT_QLOCKED(&dev->ioint);
-    else
-        DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->ioint);
+    /* Queue the interrupt */
+    queue_io_interrupt_qlocked(&dev->ioint);
 
     /* Perform cleanup for DEVBLK flags being deprecated */
     subchannel_interrupt_queue_cleanup(dev);
@@ -379,7 +277,7 @@ queue_io_interrupt_and_update_status_locked(DEVBLK* dev)
     release_lock(&sysblk.iointqlk);
 
     /* Wake up any waiters if the device isn't active or reserved */
-    if (!(dev->scsw.flag3 & (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC)) &&
+    if (!scsw_flag3(SCSW3_AC_SCHAC | SCSW3_AC_DEVAC) &&
         !dev->reserved)
     {
         dev->ioactive = DEV_SYS_NONE;
@@ -397,27 +295,26 @@ queue_io_interrupt_and_update_status_locked(DEVBLK* dev)
 /*  Locks Held on Return                                              */
 /*    None                                                            */
 /*  Locks Used                                                        */
-/*    INTLOCK                                                         */
+/*    sysblk.intlock                                                  */
 /*    dev->lock                                                       */
-/*    sysblk.iointqlk                                                 */
 /*--------------------------------------------------------------------*/
 static INLINE void
 queue_io_interrupt_and_update_status(DEVBLK* dev)
 {
-    if (likely(dev->scsw.flag3 & SCSW3_SC_PEND))
+    SCSW*   scsw = &dev->scsw;
+
+    if (scsw_status_pending(scsw))
     {
         OBTAIN_INTLOCK(NULL);
         obtain_lock(&dev->lock);
         queue_io_interrupt_and_update_status_locked(dev);
-
-        /* Finish releasing locks */
         release_lock(&dev->lock);
         RELEASE_INTLOCK(NULL);
     }
     else    /* No interrupt pending */
     {
         /* Wake up any waiters if the device isn't active or reserved */
-        if (!(dev->scsw.flag3 & (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC)) &&
+        if (!(scsw_flag3(SCSW3_AC_SCHAC | SCSW3_AC_DEVAC)) &&
             !dev->reserved)
         {
             obtain_lock(&dev->lock);
@@ -787,6 +684,70 @@ char    msgbuf[133];
 
 
 /*-------------------------------------------------------------------*/
+/*  Signal subchannel to halt or clear                               */
+/*-------------------------------------------------------------------*/
+/*  Locks held on entry/exit                                         */
+/*      dev->lock                                                    */
+/*-------------------------------------------------------------------*/
+static void
+signal_subchannel_halt_or_clear_pending(DEVBLK* dev, const BYTE ac)
+{
+    SCSW*   scsw = &dev->scsw;
+
+    /* Set activity control */
+    scsw_set_flag2(ac);
+
+    /* If the device is busy then signal subchannel to halt */
+    if ((dev->busy && dev->ioactive == DEV_SYS_LOCAL)   ||
+        (!scsw_start_function(scsw) &&
+         (scsw_resume_pending(scsw) ||
+          scsw_start_pending(scsw))     ||
+          dev->startpending)                            ||
+        scsw_suspended(scsw) || dev->suspended)
+    {
+        /* Signal the subchannel to resume if it is suspended */
+        if (scsw_suspended(scsw))
+        {
+            scsw_set_resume_pending(scsw);
+            schedule_ioq(NULL, dev);
+        }
+
+        /* Otherwise, active I/O processing will complete action */
+
+    }
+    else    /* Device not started */
+    {
+        int not_in_queue = 1;
+
+        /* Determine if the device is in the IOQ */
+        obtain_lock(&sysblk.ioqlock);
+        if (dev->startpending)
+        {
+            if (sysblk.ioq == dev)
+                sysblk.ioq = dev->nextioq;
+            else if ( sysblk.ioq != NULL )
+            {
+                DEVBLK* tmp;
+
+                /* Locate IOQ entry */
+                for (tmp = sysblk.ioq;
+                     tmp->nextioq != NULL && tmp->nextioq != dev;
+                     tmp = tmp->nextioq);
+
+                if(tmp->nextioq == dev)
+                    not_in_queue = 0;
+            }
+        }
+        release_lock(&sysblk.ioqlock);
+
+        /* Queue request if not found in the I/O queue */
+        if (not_in_queue)
+            schedule_ioq(NULL, dev);
+    }
+}
+
+
+/*-------------------------------------------------------------------*/
 /* STORE CHANNEL ID                                                  */
 /*-------------------------------------------------------------------*/
 int
@@ -881,7 +842,7 @@ int     cc = 0;                         /* Returned condition code   */
         devcount++;
 
         /* Test for pending interrupt */
-        if (IOPENDING(dev))
+        if (subchannel_status_pending(dev))
         {
             cc = 1;
             break;
@@ -920,7 +881,7 @@ testio (REGS *regs, DEVBLK *dev, BYTE ibyte)
         /* Set condition code 2 for device busy */
         cc = 2;
     }
-    else if (IOPENDING(dev))
+    else if (subchannel_status_pending(dev))
     {
         /* Issue TEST SUBCHANNEL */
         cc = test_subchan_locked (regs, dev, &irb, &ioint, &scsw);
@@ -933,7 +894,7 @@ testio (REGS *regs, DEVBLK *dev, BYTE ibyte)
             obtain_lock(&sysblk.iointqlk);
 
             /* Dequeue the interrupt */
-            DEQUEUE_IO_INTERRUPT_QLOCKED(ioint);
+            dequeue_io_interrupt_qlocked(ioint);
 
             /* Store the channel status word at PSA+X'40' */
             store_scsw_as_csw(regs, &irb.scsw);
@@ -977,10 +938,10 @@ int      pending = 0;                   /* New interrupt pending     */
 
     UNREFERENCED(ibyte);
 
+    obtain_lock (&dev->lock);
+
     if (dev->ccwtrace || dev->ccwstep)
         WRMSG (HHC01329, "I", SSID_TO_LCSS(dev->ssid), dev->devnum);
-
-    obtain_lock (&dev->lock);
 
     /* Test device status and set condition code */
     if (dev->busy)
@@ -999,13 +960,10 @@ int      pending = 0;                   /* New interrupt pending     */
             cc = 2;
 
             /* Tell channel and device to halt */
-            dev->scsw.flag2 |= SCSW2_FC_HALT;
-
-            /* Clear pending interrupts */
-            dev->pending = dev->pcipending = dev->attnpending = 0;
+            signal_subchannel_halt_or_clear_pending(dev, SCSW2_AC_HALT);
         }
     }
-    else if (!IOPENDING(dev) && dev->ctctype != CTC_LCS)
+    else if (!subchannel_status_pending(dev) && dev->ctctype != CTC_LCS)
     {
         /* Set condition code 1 */
         cc = 1;
@@ -1043,18 +1001,18 @@ int      pending = 0;                   /* New interrupt pending     */
 
     /* Queue the interrupt */
     if (pending)
-        QUEUE_IO_INTERRUPT (&dev->ioint);
-
-    release_lock (&dev->lock);
-
-    /* Update interrupt status */
-    if (pending)
     {
         OBTAIN_INTLOCK(regs);
+        obtain_lock(&sysblk.iointqlk);
+        queue_io_interrupt_qlocked (&dev->ioint);
         subchannel_interrupt_queue_cleanup(dev);
         UPDATE_IC_IOPENDING();
+        release_lock(&sysblk.iointqlk);
         RELEASE_INTLOCK(regs);
     }
+
+    /* Release remaining lock */
+    release_lock(&dev->lock);
 
     /* Return the condition code */
     return cc;
@@ -1076,7 +1034,8 @@ int      pending = 0;                   /* New interrupt pending     */
 int
 cancel_subchan (REGS *regs, DEVBLK *dev)
 {
-int     cc;                             /* Condition code            */
+    SCSW*   scsw = &dev->scsw;
+    int     cc = 1;                     /* Condition code            */
 
     UNREFERENCED(regs);
 
@@ -1093,13 +1052,8 @@ int     cc;                             /* Condition code            */
 #endif
 
     /* Check pending status */
-    if ((dev->pciscsw.flag3 & SCSW3_SC_PEND)
-     || (dev->scsw.flag3    & SCSW3_SC_PEND)
-     || (dev->attnscsw.flag3    & SCSW3_SC_PEND))
-        cc = 1;
-    else
+    if (!subchannel_status_pending(dev))
     {
-        cc = 1;
         obtain_lock(&sysblk.ioqlock);
         if(sysblk.ioq != NULL)
         {
@@ -1134,23 +1088,24 @@ int     cc;                             /* Condition code            */
         if(!cc)
         {
             /* Terminate suspended channel program */
-            if (dev->scsw.flag3 & SCSW3_AC_SUSP)
+            if (scsw_suspended(scsw))
             {
-                dev->suspended = 0;
+                subchannel_clear_suspended(dev);
                 schedule_ioq(NULL, dev);
             }
             else
             {
                 /* Reset the scsw */
-                dev->scsw.flag2 &= ~(SCSW2_AC_RESUM |
-                                     SCSW2_FC_START |
-                                     SCSW2_AC_START);
-                dev->scsw.flag3 &= ~(SCSW3_AC_SCHAC |
-                                     SCSW3_AC_DEVAC |
-                                     SCSW3_AC_SUSP);
+                scsw_clear_flag2(SCSW2_FC_START |
+                                 SCSW2_AC_RESUM |
+                                 SCSW2_AC_START);
+
+                scsw_clear_flag3(SCSW3_AC_SCHAC |
+                                 SCSW3_AC_DEVAC |
+                                 SCSW3_AC_SUSP);
 
                 /* Reset the device busy indicator */
-                clear_subchannel_busy(dev);
+                subchannel_clear_active(dev);
             }
         }
     }
@@ -1180,9 +1135,9 @@ subchannel_interrupt_queue_cleanup(DEVBLK* dev)
      * are at "unknown" bit positions. Ensure that *ALL* C compilers
      * set the target bit fields properly.
      */
-    dev->pcipending  = (dev->pciscsw.flag3  & SCSW3_SC_PEND) ? 1 : 0;
-    dev->pending     = (dev->scsw.flag3     & SCSW3_SC_PEND) ? 1 : 0;
-    dev->attnpending = (dev->attnscsw.flag3 & SCSW3_SC_PEND) ? 1 : 0;
+    dev->pcipending  = scsw_status_pending(&dev->pciscsw)  ? 1 : 0;
+    dev->pending     = scsw_status_pending(&dev->scsw)     ? 1 : 0;
+    dev->attnpending = scsw_status_pending(&dev->attnscsw) ? 1 : 0;
 }
 
 
@@ -1201,49 +1156,53 @@ test_subchan_clear(DEVBLK* dev, SCSW* scsw)
 {
     int cc = 1;                         /* Status not cleared        */
 
-    /* Remove pending condition and requirement for TEST SUBCHANNEL */
-    dev->tschpending = 0;
-
     /* Clearing only occurs if status is pending */
-    if (scsw != NULL && scsw->flag3 & SCSW3_SC_PEND)
+    if (scsw_status_pending(scsw))
     {
-        if (scsw->flag3 & SCSW3_SC_INTER)
+        if (scsw_intermediate_status(scsw))
         {
-                                        /* SA22-7832-09, page 16-22  */
-            scsw->flag1 &= ~SCSW1_Z;    /* Reset Zero Condition Code */
+            /* Reset Zero Condition Code
+             * SA22-7832-09, page 16-22
+             */
+            if (scsw_Z(scsw))
+            {
+                scsw_clear_Z(&dev->pciscsw);
+                scsw_clear_Z(&dev->scsw);
+            }
 
             scsw_clear_fc_Nc(scsw);
             scsw_clear_ac_Nr(scsw);
             scsw_clear_sc_Cs(scsw);
             /*          n_Nr(scsw); Implied by ac_NR */
             scsw_clear_q_C(scsw);
-            cc = 0;
         }
-        else if ((scsw->flag3 & (SCSW3_SC_ALERT  |
+        else /* ((scsw->flag3 & (SCSW3_SC_ALERT  |
                                  SCSW3_SC_PRI    |
                                  SCSW3_SC_SEC))  ||
-                 (scsw->flag3 & SCSW3_SC) == SCSW3_SC_PEND)
+                 (scsw->flag3 & SCSW3_SC) == SCSW3_SC_PEND) */
         {
             /* SA22-7832-09, page 16-17, TEST SUBCHANNEL clears
              * device suspended indication if suppressed
              */
             if (scsw == &dev->scsw          &&
-                scsw->flag1 & SCSW1_U       &&
-                scsw->flag3 & SCSW3_AC_SUSP)
-                dev->busy = dev->suspended = 0;
+                scsw_U(scsw)                &&
+                scsw_suspended(scsw))
+            {
+                dev->suspended = 0;
+            }
 
             scsw_clear_fc_C(scsw);
             scsw_clear_ac_Cp(scsw);
             scsw_clear_sc_Cs(scsw);
             scsw_clear_n_C(scsw);
             scsw_clear_q_C(scsw);
-            cc = 0;
+
+            dev->busy = 0;
         }
+
+        /* Indicate clear completed */
+        cc = 0;
     }
-
-    /* Ensure old DEVBLK status bits are maintained */
-    subchannel_interrupt_queue_cleanup(dev);
-
     /* Return completion code */
     return (cc);
 }
@@ -1267,7 +1226,6 @@ test_subchan_clear(DEVBLK* dev, SCSW* scsw)
 /*      instruction:  0=status was pending and is now cleared,       */
 /*      1=no status was pending.  The IRB is updated in both cases.  */
 /* Locks held on entry                                               */
-/*      INTLOCK         Held by caller                               */
 /*      dev->lock       Held by caller                               */
 /*      iointqlk        Held by caller                               */
 /*-------------------------------------------------------------------*/
@@ -1275,53 +1233,97 @@ int
 test_subchan_locked (REGS* regs, DEVBLK* dev,
                      IRB* irb, IOINT** ioint, SCSW** scsw)
 {
-    enum                                /* Status types              */
-    {                                   /* ...                       */
-        pci,                            /* PCI Status                */
-        normal,                         /* Normal Status             */
-        attn                            /* Attention Status          */
-    } status;                           /* ...                       */
+    scsw_type   status = scsw_select_type(dev);
+    int         cc     = 1;             /* No status pending         */
 
-    int cc = 1;                         /* No status pending         */
+    UNREFERENCED(regs);
 
-    UNREFERENCED( regs );
+    /* Select SCSW for presentation */
+    switch (status)
+    {
+        case scsw_pci:
+            *ioint = &dev->pciioint;
+            *scsw  = &dev->pciscsw;
+            break;
 
-    if (unlikely((dev->pciscsw.flag3 & SCSW3_SC_PEND)))
-    {
-        status = pci;
-        *ioint = &dev->pciioint;
-        *scsw  = &dev->pciscsw;
-    }
-    else if (likely( (dev->scsw.flag3     & SCSW3_SC_PEND)  ||
-                    !(dev->attnscsw.flag3 & SCSW3_SC_PEND)))
-    {
-        status = normal;
-        *ioint = &dev->ioint;
-        *scsw  = &dev->scsw;
-    }
-    else
-    {
-        status = attn;
-        *ioint = &dev->attnioint;
-        *scsw  = &dev->attnscsw;
+        default:
+        case scsw_normal:
+            *ioint = &dev->ioint;
+            *scsw  = &dev->scsw;
+            break;
+
+        case scsw_attn:
+            *ioint = &dev->attnioint;
+            *scsw  = &dev->attnscsw;
+            break;
     }
 
     /* Ensure status removed from interrupt queue */
-    DEQUEUE_IO_INTERRUPT_QLOCKED(*ioint);
+    dequeue_io_interrupt_qlocked(*ioint);
 
-    /* Display the subchannel status word */
-    if (dev->ccwtrace || dev->ccwstep)
+    /* Perform additional processing, if required, to handle the three
+     * SCSW types.
+     */
+    switch (status)
     {
-        display_scsw (dev, **scsw);
-    }
+        default:
+            break;
 
-    /* Copy the PCI SCSW to the IRB */
-    irb->scsw = **scsw;
+        case scsw_pci:
+            scsw_clear_intermediate_pending(&dev->scsw);
+            break;
+
+        case scsw_normal:
+            /* If a PCI is also queued, dequeue and clear PCI, but
+             * don't present the PCI status.
+             */
+            if (dev->pciioint.priority != -1 &&
+                !scsw_clear_function(*scsw))
+            {
+                int busy = dev->busy;
+
+                dequeue_io_interrupt_qlocked(&dev->pciioint);
+                test_subchan_clear(dev, &dev->pciscsw);
+                dev->busy = busy;
+            }
+
+            /* Detect if early/late CLEAR function cleanup is required
+             * by Test Subchannel.
+             *
+             * An example of this situation occurs when a CSCH is
+             * issued between an I/O interrupt for the device and a
+             * TSCH.
+             */
+            else if (unlikely(scsw_clear_function(*scsw) &&
+                             !scsw_status_pending(*scsw)))
+            {
+                dequeue_io_interrupt_qlocked(&dev->pciioint);
+                test_subchan_clear(dev, &dev->pciscsw);
+
+                dequeue_io_interrupt_qlocked(&dev->attnioint);
+                test_subchan_clear(dev, &dev->attnscsw);
+            }
+
+#if 0
+            else if (unlikely(scsw_clear_pending(*scsw) &&
+                              scsw_primary_and_secondary_pending(*scsw)))
+            {
+                /* Late CLEAR; execution already completed */
+                perform_clear_subchan_locked(dev);
+
+                if (dev->ccwtrace || dev->ccwstep)
+                    WRMSG (HHC01308, "I", SSID_TO_LCSS(dev->ssid),
+                                          dev->devnum);
+            }
+#endif
+
+            break;
+    }
 
     /* Clear the ESW and ECW in the IRB */
     switch (status)
     {
-        case normal:
+        case scsw_normal:
 
             /* Copy the extended status word to the IRB */
             irb->esw = dev->esw;
@@ -1338,8 +1340,21 @@ test_subchan_locked (REGS* regs, DEVBLK* dev,
             break;
     }
 
+    /* Copy the SCSW to the IRB */
+    memcpy(&irb->scsw, *scsw, sizeof(SCSW));
+
+    /* Display the subchannel status word */
+    if (dev->ccwtrace || dev->ccwstep)
+        display_scsw (dev, **scsw);
+
     /* Clear the subchannel and set condition code */
     cc = test_subchan_clear(dev, *scsw);
+
+    /* Ensure old DEVBLK status bits are maintained */
+    subchannel_interrupt_queue_cleanup(dev);
+
+    /* Clear pending requirement for TEST SUBCHANNEL */
+    dev->tschpending = 0;
 
     /* Update pending interrupts */
     UPDATE_IC_IOPENDING_QLOCKED();
@@ -1385,7 +1400,7 @@ test_subchan (REGS *regs, DEVBLK *dev, IRB *irb)
 
         /* For I/O assisted devices we must intercept if type B
            status is present on the subchannel */
-        if (dev->pciscsw.flag3 & SCSW3_SC_PEND &&
+        if (scsw_status_pending(&dev->pciscsw) &&
             (regs->siebk->tschds & dev->pciscsw.unitstat  ||
              regs->siebk->tschsc & dev->pciscsw.chanstat))
         {
@@ -1423,37 +1438,22 @@ test_subchan (REGS *regs, DEVBLK *dev, IRB *irb)
 
 
 /*-------------------------------------------------------------------*/
-/* Perform CLEAR SUBCHANNEL operation                                */
+/* Perform CLEAR SUBCHANNEL operation (locked)                       */
 /*-------------------------------------------------------------------*/
 /* Input                                                             */
 /*      dev     -> Device control block                              */
-/* Locks on Entry                                                    */
-/*      INTLOCK(NULL)   Held by caller                               */
+/* Locks Held on Entry and Return                                    */
 /*      dev->lock       Held by caller                               */
-/* Locks on Return                                                   */
-/*      INTLOCK(NULL)   Held by caller                               */
-/*      dev->lock       Held by caller                               */
-/* Locks Used                                                        */
-/*      sysblk.iointqlk                                             */
+/*      sysblk.iointqlk                                              */
 /*-------------------------------------------------------------------*/
 void
-perform_clear_subchan (DEVBLK *dev)
+perform_clear_subchan_locked (DEVBLK *dev)
 {
-    /* Dequeue pending interrupts */
-    obtain_lock(&sysblk.iointqlk);
-    DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->ioint);
-    dev->scsw.flag3 &= ~SCSW3_SC_PEND;
-    dev->pending = 0;
-    clear_device_busy(dev);
-    clear_subchannel_busy(dev);
-    DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->pciioint);
-    dev->pciscsw.flag3 &= ~SCSW3_SC_PEND;
-    dev->pcipending = 0;
-    clear_subchannel_busy_scsw(&dev->pciscsw);
-    DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->attnioint);
-    dev->attnscsw.flag3 &= ~SCSW3_SC_PEND;
-    dev->attnpending = 0;
-    dev->tschpending = 0;
+    SCSW*   scsw    = &dev->scsw;
+
+    /* Indicate clearing active */
+    scsw_set_clear_function(scsw);
+    scsw_set_clear_pending(scsw);
 
     /* [15.3.2] Perform clear function subchannel modification */
     dev->pmcw.pom = 0xFF;
@@ -1461,30 +1461,56 @@ perform_clear_subchan (DEVBLK *dev)
     dev->pmcw.pnom = 0x00;
 
     /* [15.3.3] Perform clear function signaling and completion */
-    dev->scsw.flag0 = 0;
-    dev->scsw.flag1 = 0;
-    dev->scsw.flag2 &= ~(SCSW2_FC | SCSW2_AC);
-    dev->scsw.flag2 |= SCSW2_FC_CLEAR;
-    /* Shortcut setting of flag3 due to clear and setting of just the
-     * status pending flag:
-     *   scsw.flag3 &= ~(SCSW3_AC | SCSW3_SC);
-     *   scsw.flag3 |= SCSW3_SC_PEND;
-     */
-    dev->scsw.flag3 = SCSW3_SC_PEND;
-    store_fw (dev->scsw.ccwaddr, 0);
-    dev->scsw.chanstat = 0;
-    dev->scsw.unitstat = 0;
-    store_hw (dev->scsw.count, 0);
+    device_clear_active(dev);
+    subchannel_clear_active(dev);
+    subchannel_clear_status(dev);
+
+    /* Set final status */
+    scsw_set_clear_function(scsw);
+    scsw_set_status_pending(scsw);
 
     /* Queue the pending interrupt and update status */
-    QUEUE_IO_INTERRUPT_QLOCKED(&dev->ioint);
     subchannel_interrupt_queue_cleanup(dev);
+    queue_io_interrupt_qlocked(&dev->ioint);
     UPDATE_IC_IOPENDING_QLOCKED();
+}
+
+
+/*-------------------------------------------------------------------*/
+/* Perform CLEAR SUBCHANNEL operation                                */
+/*-------------------------------------------------------------------*/
+/* Input                                                             */
+/*      dev     -> Device control block                              */
+/* Locks on Entry and Return                                         */
+/*      sysblk.intlock                                               */
+/*      dev->lock                                                    */
+/* Locks Used                                                        */
+/*      sysblk.iointqlk                                             */
+/*-------------------------------------------------------------------*/
+void
+perform_clear_subchan (DEVBLK *dev)
+{
+    SCSW*   scsw    = &dev->scsw;
+
+    /* Indicate CLEAR active */
+    scsw_set_clear_function(scsw);
+
+    /* Obtain I/O interrupt queue lock */
+    obtain_lock(&sysblk.iointqlk);
+
+    /* Perform fully-locked portion of clear subchannel */
+    perform_clear_subchan_locked(dev);
+
+    /* Release the I/O interrupt queue lock */
     release_lock(&sysblk.iointqlk);
 
+    /* Trace completion */
     if (dev->ccwtrace || dev->ccwstep)
         WRMSG (HHC01308, "I", SSID_TO_LCSS(dev->ssid),
                               dev->devnum);
+
+    /* Device is no longer busy */
+    dev->busy = 0;
 
     /* Wake up any waiters if the device isn't reserved */
     if (!dev->reserved)
@@ -1506,6 +1532,8 @@ perform_clear_subchan (DEVBLK *dev)
 void
 clear_subchan (REGS *regs, DEVBLK *dev)
 {
+    SCSW*   scsw = &dev->scsw;
+
     UNREFERENCED(regs);
 
     if (dev->ccwtrace || dev->ccwstep)
@@ -1520,147 +1548,15 @@ clear_subchan (REGS *regs, DEVBLK *dev)
     }
 #endif
 
-    OBTAIN_INTLOCK(NULL);
+    /* Only the device lock is needed */
     obtain_lock(&dev->lock);
 
-    /* If the device is busy then signal the device to clear */
-    if ((dev->busy  && dev->ioactive == DEV_SYS_LOCAL)
-     || dev->startpending)
-    {
-        /* Set clear pending condition */
-        dev->scsw.flag2 |= SCSW2_FC_CLEAR | SCSW2_AC_CLEAR;
-
-        /* Signal the subchannel to resume if it is suspended */
-        if (dev->scsw.flag3 & SCSW3_AC_SUSP)
-        {
-            dev->scsw.flag2 |= SCSW2_AC_RESUM;
-            schedule_ioq(NULL, dev);
-        }
-
-        /* Invoke the provided halt device routine if it has been
-         * provided by the handler code at init
-         */
-        else if(dev->hnd->halt!=NULL)
-        {
-            /* Revert to just holding dev->lock */
-            release_lock(&dev->lock);
-            RELEASE_INTLOCK(NULL);
-            obtain_lock(&dev->lock);
-
-            /* Call the device's halt routine */
-            dev->hnd->halt(dev);
-
-            /* Release dev->lock and return */
-            release_lock(&dev->lock);
-            return;
-        }
-
-#if !defined(NO_SIGABEND_HANDLER)
-        else if( dev->ctctype )
-        {
-            signal_thread(dev->tid, SIGUSR2);
-        }
-#endif /*!defined(NO_SIGABEND_HANDLER)*/
-
-    }
-    else
-        perform_clear_subchan(dev);
+    /* Set clear pending condition */
+    signal_subchannel_halt_or_clear_pending(dev, SCSW2_AC_CLEAR);
 
     release_lock (&dev->lock);
-    RELEASE_INTLOCK(NULL);
-
 
 } /* end function clear_subchan */
-
-
-/*-------------------------------------------------------------------*/
-/* Perform HALT and release device lock                              */
-/*-------------------------------------------------------------------*/
-/* Input                                                             */
-/*      dev     -> Device control block                              */
-/* Return value                                                      */
-/*      None                                                         */
-/* Locks                                                             */
-/*      INTLOCK   must be held by caller on entry.                   */
-/*      dev->lock must be held by caller on entry; lock is released  */
-/*                prior to return.                                   */
-/*-------------------------------------------------------------------*/
-void
-perform_halt_and_release_lock (DEVBLK *dev)
-{
-    /* If status incomplete,
-     * [15.4.2] Perform halt function signaling
-     */
-    if (!(dev->scsw.flag3 & (SCSW3_SC_PRI | SCSW3_SC_SEC) &&
-          dev->scsw.flag3 & SCSW3_SC_PEND))
-    {
-
-        /* Indicate HALT started */
-        set_subchannel_busy(dev);
-        dev->scsw.flag2 |= SCSW2_FC_HALT;
-        dev->scsw.flag2 &= ~SCSW2_AC_HALT;
-
-        /* If intermediate status pending with subchannel and device
-         * active, reset intermediate status pending (HSCH, fifth
-         * paragraph).
-         */
-        if ((dev->scsw.flag3 &
-             (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC | SCSW3_SC_INTER | SCSW3_SC_PEND)) ==
-             (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC | SCSW3_SC_INTER | SCSW3_SC_PEND))
-            dev->scsw.flag3 &= ~(SCSW3_SC_INTER | SCSW3_SC_PEND);
-
-        /* Interim post-facto check for missing deferred condition code
-         * Based on the Deferred-Condition-Code Meaning for Status-
-         * Pending Subchannel (Figure 16-5).
-         */
-        if (!(dev->scsw.flag0 & SCSW0_CC) &&
-             (dev->scsw.flag2 & (SCSW2_FC_START |
-                                 SCSW2_AC_RESUM |
-                                 SCSW2_AC_START)))
-        {
-            switch (AIPSX(&dev->scsw) & 0x0F)
-            {
-                case 0x0F:
-                case 0x0D:
-                case 0x09:
-                case 0x07:
-                case 0x05:
-                case 0x03:
-                case 0x01:
-                    dev->scsw.flag0 &= ~SCSW0_CC;
-                    dev->scsw.flag1 &= ~SCSW1_Z;
-                    dev->scsw.flag0 |=  SCSW0_CC_1;
-                    break;
-            }
-        }
-
-        /* Invoke the provided halt device routine if it has been
-         * provided by the handler code at init; SCSW has not yet been
-         * reset to permit device handlers to see HALT condition.
-         */
-        if(dev->hnd->halt!=NULL)
-            dev->hnd->halt(dev);
-#if !defined(NO_SIGABEND_HANDLER)
-        else if( dev->ctctype && dev->tid)
-            signal_thread(dev->tid, SIGUSR2);
-#endif /*!defined(NO_SIGABEND_HANDLER)*/
-
-        /* Mark pending interrupt */
-        dev->scsw.flag3 |= SCSW3_SC_PEND;
-    }
-
-    /* Trace HALT */
-    if (dev->ccwtrace || dev->ccwstep)
-        WRMSG (HHC01300, "I", SSID_TO_LCSS(dev->ssid), dev->devnum, 0);
-
-    /* Queue pending I/O interrupt and update status */
-    queue_io_interrupt_and_update_status_locked(dev);
-
-    /* Turn off busy bit */
-    clear_subchannel_busy(dev);
-
-    release_lock(&dev->lock);
-}
 
 
 /*-------------------------------------------------------------------*/
@@ -1676,13 +1572,98 @@ perform_halt_and_release_lock (DEVBLK *dev)
 /*      None                                                         */
 /* Locks Used                                                        */
 /*      dev->lock                                                    */
+/*      sysblk.iointqlk                                              */
 /*-------------------------------------------------------------------*/
-void
+static void
 perform_halt (DEVBLK *dev)
 {
+    SCSW*   scsw = &dev->scsw;
+
     OBTAIN_INTLOCK(NULL);
     obtain_lock(&dev->lock);
-    perform_halt_and_release_lock(dev);
+
+    /* Ensure pending flag properly set */
+    scsw_update_pending(scsw);
+
+    /* If status incomplete,
+     * [15.4.2] Perform halt function signaling
+     */
+    if (!scsw_primary_or_secondary_pending(scsw))
+    {
+
+        /* Interim post-facto check for missing deferred condition code
+         * Based on the Deferred-Condition-Code Meaning for Status-
+         * Pending Subchannel (Figure 16-5).
+         */
+        if (scsw_I(scsw)        &&
+            (!scsw_CC(scsw))    &&
+            (!scsw_Z(scsw))     &&
+            scsw_flag2(SCSW2_FC_START |
+                       SCSW2_AC_RESUM |
+                       SCSW2_AC_START))
+        {
+            switch (AIPSX(scsw) & 0x0F)
+            {
+                case 0x0F:
+                case 0x0D:
+                case 0x09:
+                case 0x07:
+                case 0x05:
+                case 0x03:
+                case 0x01:
+                    scsw_set_CC(scsw, 1);
+                    break;
+            }
+        }
+
+        /* Indicate HALT started */
+        subchannel_set_active(dev);
+        scsw_set_halt_function(scsw);
+
+        /* If intermediate status pending with subchannel and device
+         * active, reset intermediate status pending (HSCH, fifth
+         * paragraph).
+         */
+        if (scsw_test_flag3(SCSW3_AC_SCHAC |
+                            SCSW3_AC_DEVAC |
+                            SCSW3_SC_INTER |
+                            SCSW3_SC_PEND))
+            scsw_clear_intermediate_pending(scsw);
+
+        /* Invoke the provided halt device routine if it has been
+         * provided by the handler code at init; SCSW has not yet been
+         * reset to permit device handlers to see HALT condition.
+         */
+        if(dev->hnd->halt!=NULL)
+            dev->hnd->halt(dev);
+#if !defined(NO_SIGABEND_HANDLER)
+        /* FIXME: This belongs in the device halt handler */
+        else if( dev->ctctype && dev->tid)
+            signal_thread(dev->tid, SIGUSR2);
+#endif /*!defined(NO_SIGABEND_HANDLER)*/
+
+        /* FIXME: Reserved reset belongs in the device halt handler */
+        dev->reserved = 0;
+
+        /* The device has been signaled; clear the Halt-Pending
+         * condition and set primary and secondary status pending.
+         */
+        scsw_clear_halt_pending(scsw);
+        scsw_set_primary_and_secondary_pending(scsw);
+    }
+
+    /* Trace HALT */
+    if (dev->ccwtrace || dev->ccwstep)
+        WRMSG (HHC01300, "I", SSID_TO_LCSS(dev->ssid), dev->devnum, 0);
+
+    /* Queue pending I/O interrupt and update status */
+    queue_io_interrupt_and_update_status_locked(dev);
+
+    /* Turn off busy bit */
+    subchannel_clear_active(dev);
+
+    /* Release locks and return */
+    release_lock(&dev->lock);
     RELEASE_INTLOCK(NULL);
 }
 
@@ -1700,12 +1681,19 @@ perform_halt (DEVBLK *dev)
 int
 halt_subchan (REGS *regs, DEVBLK *dev)
 {
+    SCSW*   scsw        = &dev->scsw;
+    SCSW*   attnscsw    = &dev->attnscsw;
+    SCSW*   pciscsw     = &dev->pciscsw;
+
+    BYTE    on;
+    BYTE    off;
+
     UNREFERENCED(regs);
 
     if (dev->ccwtrace || dev->ccwstep)
         WRMSG (HHC01332, "I", SSID_TO_LCSS(dev->ssid), dev->devnum);
 
-    OBTAIN_INTLOCK(regs);
+    /* Only the device lock is required */
     obtain_lock (&dev->lock);
 
 #if defined(_FEATURE_IO_ASSIST)
@@ -1714,141 +1702,68 @@ halt_subchan (REGS *regs, DEVBLK *dev)
         || !(dev->pmcw.flag27 & PMCW27_I)))
     {
         release_lock (&dev->lock);
-        RELEASE_INTLOCK(regs);
         longjmp(regs->progjmp,SIE_INTERCEPT_INST);
     }
 #endif
 
     /* Set condition code 1 if subchannel is status pending alone or
        is status pending with alert, primary, or secondary status */
-    if ((dev->scsw.flag3 & SCSW3_SC) == SCSW3_SC_PEND
-        || ((dev->scsw.flag3 & SCSW3_SC_PEND)
-            && (dev->scsw.flag3 &
-                    (SCSW3_SC_ALERT | SCSW3_SC_PRI | SCSW3_SC_SEC))))
+    if ((scsw->flag3 & SCSW3_SC) == SCSW3_SC_PEND
+        || scsw_primary_or_secondary_pending(scsw))
     {
         if (dev->ccwtrace || dev->ccwstep)
             WRMSG (HHC01300, "I", SSID_TO_LCSS(dev->ssid), dev->devnum, 1);
         release_lock (&dev->lock);
-        RELEASE_INTLOCK(regs);
         return 1;
     }
 
     /* Set condition code 2 if the halt function or the clear
        function is already in progress at the subchannel */
-    if (dev->scsw.flag2 & (SCSW2_AC_HALT | SCSW2_AC_CLEAR))
+    if (scsw_halt_or_clear_function(scsw))
     {
         if (dev->ccwtrace || dev->ccwstep)
             WRMSG (HHC01300, "I", SSID_TO_LCSS(dev->ssid), dev->devnum, 2);
         release_lock (&dev->lock);
-        RELEASE_INTLOCK(regs);
         return 2;
     }
 
     /* Ensure SCSW flags are set from the ORB */
-    if (dev->orb.flag4 & ORB4_S)
-    {
-        dev->scsw.flag0     |= SCSW0_S;
-        dev->pciscsw.flag0  |= SCSW0_S;
-        dev->attnscsw.flag0 |= SCSW0_S;
-    }
+    on  = dev->orb.flag4 & ORB4_S;
+    off = ~(SCSW0_S);
+    scsw->flag0     &= off;
+    scsw->flag0     |= on;
+    pciscsw->flag0  &= off;
+    pciscsw->flag0  |= on;
+    attnscsw->flag0 &= off;
+    attnscsw->flag0 |= on;
 
-    if (dev->orb.flag5 & ORB5_F)
-    {
-        dev->scsw.flag1     |= SCSW1_F;
-        dev->pciscsw.flag1  |= SCSW1_F;
-        dev->attnscsw.flag1 |= SCSW1_F;
-    }
-
-    if (dev->orb.flag5 & ORB5_P)
-    {
-        dev->scsw.flag1     |= SCSW1_P;
-        dev->pciscsw.flag1  |= SCSW1_P;
-        dev->attnscsw.flag1 |= SCSW1_P;
-    }
-
-    if (dev->orb.flag5 & ORB5_I)
-    {
-        dev->scsw.flag1     |= SCSW1_I;
-        dev->pciscsw.flag1  |= SCSW1_I;
-        dev->attnscsw.flag1 |= SCSW1_I;
-    }
-
-    if (dev->orb.flag5 & ORB5_A)
-    {
-        dev->scsw.flag1     |= SCSW1_A;
-        dev->pciscsw.flag1  |= SCSW1_A;
-        dev->attnscsw.flag1 |= SCSW1_A;
-    }
-
-    if (dev->orb.flag5 & ORB5_U)
-    {
-        dev->scsw.flag1     |= SCSW1_U;
-        dev->pciscsw.flag1  |= SCSW1_U;
-        dev->attnscsw.flag1 |= SCSW1_U;
-    }
-
-    /* Indicate halt pending to the various SCSWs for device */
-    dev->attnscsw.flag2 |= SCSW2_AC_HALT;
-    dev->pciscsw.flag2  |= SCSW2_AC_HALT;
-    dev->scsw.flag2     |= SCSW2_AC_HALT;
+    on  = dev->orb.flag5 & (ORB5_F | ORB5_P | ORB5_I | ORB5_A | ORB5_U);
+    off = ~(SCSW1_F | SCSW1_P | SCSW1_I | SCSW1_A | SCSW1_U);
+    scsw->flag1     &= off;
+    scsw->flag1     |= on;
+    pciscsw->flag1  &= off;
+    pciscsw->flag1  |= on;
+    attnscsw->flag1 &= off;
+    attnscsw->flag1 |= on;
 
     /* If intermediate status pending with subchannel and device active,
      * reset intermediate status pending (HSCH, fifth paragraph).
      */
-    if ((dev->scsw.flag3 &
-        (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC | SCSW3_SC_INTER | SCSW3_SC_PEND)) ==
-        (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC | SCSW3_SC_INTER | SCSW3_SC_PEND))
-        dev->scsw.flag3 &= ~(SCSW3_SC_INTER | SCSW3_SC_PEND);
+    if (scsw_test_flag3(SCSW3_AC_SCHAC |
+                        SCSW3_AC_DEVAC |
+                        SCSW3_SC_INTER |
+                        SCSW3_SC_PEND))
+        scsw_clear_intermediate_pending(scsw);
 
-    /* If the device is busy then signal subchannel to halt */
-    if ((dev->busy && dev->ioactive == DEV_SYS_LOCAL)
-     || dev->startpending || dev->suspended)
-    {
-        /* Set halt condition and reset pending condition */
-        dev->scsw.flag2 |= (SCSW2_FC_HALT | SCSW2_AC_HALT);
-        dev->scsw.flag3 &= ~SCSW3_SC_PEND;
+    /* Indicate halt pending to the various SCSWs for device */
+    scsw_set_halt_pending(attnscsw);
+    scsw_set_halt_pending(pciscsw);
+    scsw_set_halt_pending(scsw);
 
-        /* Signal the subchannel to resume if it is suspended */
-        if (dev->scsw.flag3 & SCSW3_AC_SUSP)
-        {
-            dev->scsw.flag2 |= SCSW2_AC_RESUM;
-            signal_condition (&dev->resumecond);
-        }
+    signal_subchannel_halt_or_clear_pending(dev, SCSW2_AC_HALT);
 
-        release_lock(&dev->lock);
-    }
-    else    /* Device not started */
-    {
-        /* Remove the device from the ioq if startpending and queued;
-         * lock required before test to keep from entering queue and
-         * becoming active prior to queue manipulation.
-         */
-        obtain_lock(&sysblk.ioqlock);
-        if(dev->startpending)
-        {
-            if(sysblk.ioq == dev)
-                sysblk.ioq = dev->nextioq;
-            else if ( sysblk.ioq != NULL )
-            {
-             DEVBLK *tmp;
-                for(tmp = sysblk.ioq;
-                    tmp->nextioq != NULL && tmp->nextioq != dev;
-                    tmp = tmp->nextioq);
-                if(tmp->nextioq == dev)
-                {
-                    tmp->nextioq = tmp->nextioq->nextioq;
-                    sysblk.devtunavail = MAX(0, sysblk.devtunavail -1);
-                }
-            }
-            dev->startpending = 0;
-        }
-        release_lock(&sysblk.ioqlock);
-
-        /* Halt the device */
-        perform_halt_and_release_lock(dev);
-    }
-
-    RELEASE_INTLOCK(regs);
+    /* Release the locks */
+    release_lock(&dev->lock);
 
     /* Return condition code zero */
     return 0;
@@ -1863,20 +1778,28 @@ halt_subchan (REGS *regs, DEVBLK *dev)
 /*     chp_reset                                                     */
 /*     io_reset                                                      */
 /*                                                                   */
-/*   Caller holds `intlock'                                          */
+/*   Caller holds 'intlock'                                          */
 /*-------------------------------------------------------------------*/
 static void
 device_reset (DEVBLK *dev)
 {
     obtain_lock (&dev->lock);
 
+    if (dev->suspended)
+    {
+        scsw_set_clear_pending(&dev->scsw);
+        release_lock(&dev->lock);
+        call_execute_ccw_chain(sysblk.arch_mode, dev);
+        obtain_lock(&dev->lock);
+    }
+
     obtain_lock(&sysblk.iointqlk);
-    DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->ioint);
-    DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->pciioint);
-    DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->attnioint);
+    dequeue_io_interrupt_qlocked(&dev->ioint);
+    dequeue_io_interrupt_qlocked(&dev->pciioint);
+    dequeue_io_interrupt_qlocked(&dev->attnioint);
     release_lock(&sysblk.iointqlk);
 
-    clear_subchannel_busy(dev);
+    subchannel_clear_active(dev);
 
 #if defined(OPTION_SYNCIO)
     dev->syncio = dev->syncio_active = dev->syncio_retry =
@@ -1885,11 +1808,6 @@ device_reset (DEVBLK *dev)
     dev->reserved = dev->pending = dev->pcipending =
     dev->attnpending = dev->startpending = 0;
     dev->ioactive = DEV_SYS_NONE;
-    if (dev->suspended)
-    {
-        dev->suspended = 0;
-        schedule_ioq(NULL, dev);
-    }
     if (dev->iowaiters) signal_condition (&dev->iocond);
     store_fw (dev->pmcw.intparm, 0);
     dev->pmcw.flag4 &= ~PMCW4_ISC;
@@ -1941,8 +1859,7 @@ device_reset (DEVBLK *dev)
     }
 #endif /* defined(FEATURE_VM_BLOCKIO) */
 
-    if (dev->hnd->halt!=NULL)
-        dev->hnd->halt(dev);
+    call_exit_locked(halt);
 
     release_lock (&dev->lock);
 } /* end device_reset() */
@@ -1970,9 +1887,6 @@ DEVBLK *dev;                            /* -> Device control block   */
 /*-------------------------------------------------------------------*/
 /* Reset all devices on a particular chpid                           */
 /* Called by io.c 'RHCP' Reset Channel Path instruction.             */
-/*                                                                   */
-/* FIXME: Console code belongs in the device code.                   */
-/*                                                                   */
 /*-------------------------------------------------------------------*/
 int
 chp_reset(BYTE chpid, int solicited)
@@ -2012,9 +1926,6 @@ int reset = 0;
 /* be IPLed from current position in a tape or card reader file.     */
 /*                                                                   */
 /* Caller holds `intlock'                                            */
-/*                                                                   */
-/* FIXME: Console references belong in the console device driver     */
-/*        code!                                                      */
 /*-------------------------------------------------------------------*/
 void
 io_reset (void)
@@ -2136,6 +2047,7 @@ DLL_EXPORT void *
 device_thread (void *arg)
 {
 #ifdef _MSVC_
+static const char* idletext = "idle device thread";
 char    thread_name[32];
 #endif
 DEVBLK *dev;
@@ -2144,6 +2056,11 @@ int     rc = 0;                         /* Return code               */
 u_int   waitcount = 0;                  /* Wait counter              */
 
     UNREFERENCED(arg);
+
+#ifdef _MSVC_
+    strncpy(thread_name, idletext, sizeof(thread_name));
+    SET_THREAD_NAME_ID(-1, thread_name);
+#endif
 
     current_priority = getpriority(PRIO_PROCESS, 0);
     if (current_priority != sysblk.devprio)
@@ -2179,9 +2096,8 @@ u_int   waitcount = 0;                  /* Wait counter              */
 #ifdef _MSVC_
             MSGBUF( thread_name,
                 "device %4.4X thread", dev->devnum );
-            thread_name[sizeof(thread_name)-1]=0;
 #endif
-            SET_THREAD_NAME(thread_name);
+//          SET_THREAD_NAME_ID(-1, thread_name);
 
             release_lock (&sysblk.ioqlock);
 
@@ -2194,7 +2110,7 @@ u_int   waitcount = 0;                  /* Wait counter              */
             }
 
             /* Execute requested CCW chain */
-            call_execute_ccw_chain(sysblk.arch_mode, dev);
+             call_execute_ccw_chain(sysblk.arch_mode, dev);
 
             /* Reset priority back to device default priority */
             if (current_priority != sysblk.devprio)
@@ -2222,7 +2138,10 @@ u_int   waitcount = 0;                  /* Wait counter              */
         /* Show thread as idle */
         waitcount++;
         sysblk.devtwait++;
-        SET_THREAD_NAME("idle device thread");
+
+#ifdef _MSVC_
+        strncpy(thread_name, idletext, sizeof(thread_name));
+#endif
 
         /* Wait for work to arrive */
         rc = timed_wait_condition_relative_usecs (&sysblk.ioqcond,
@@ -2463,7 +2382,8 @@ schedule_ioq (const REGS *regs, DEVBLK *dev)
 int
 resume_subchan (REGS *regs, DEVBLK *dev)
 {
-int cc;                                 /* Return code               */
+    SCSW*   scsw = &dev->scsw;          /* Current SCSW              */
+    int     cc;                         /* Return code               */
 
     obtain_lock (&dev->lock);
 
@@ -2481,9 +2401,7 @@ int cc;                                 /* Return code               */
      *
      * SA22-7832-09, RESUME SUBCHANNEL, Condition Code 1, p. 14-11
      */
-    if (dev->scsw.flag3     & SCSW3_SC_PEND ||
-        dev->pciscsw.flag3  & SCSW3_SC_PEND ||
-        dev->attnscsw.flag3 & SCSW3_SC_PEND)
+    if (subchannel_status_pending(dev))
     {
         cc = 1;
     }
@@ -2496,13 +2414,15 @@ int cc;                                 /* Return code               */
      */
     else if (unlikely(!(dev->orb.flag4  & ORB4_S)           ||
                       !(dev->scsw.flag2 & SCSW2_FC)         ||
-                      !(dev->scsw.flag3 & SCSW3_AC_SUSP)    ||
-                      (dev->scsw.flag2 &
-                       (SCSW2_FC_HALT  | SCSW2_FC_CLEAR |
-                        SCSW2_AC_RESUM | SCSW2_AC_START |
-                        SCSW2_AC_HALT  | SCSW2_AC_CLEAR))   ||
-                      (dev->scsw.flag3 &
-                       (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC))))
+                      !(scsw_suspended(scsw))               ||
+                      (scsw_flag2(SCSW2_FC_HALT  |
+                                  SCSW2_FC_CLEAR |
+                                  SCSW2_AC_RESUM |
+                                  SCSW2_AC_START |
+                                  SCSW2_AC_HALT  |
+                                  SCSW2_AC_CLEAR))          ||
+                      (scsw_flag3(SCSW3_AC_SCHAC |
+                                  SCSW3_AC_DEVAC))))
     {
         cc = 2;
     }
@@ -2511,11 +2431,11 @@ int cc;                                 /* Return code               */
     else
     {
         /* Clear the path not-operational mask if in suspend state */
-        if (dev->scsw.flag3 & SCSW3_AC_SUSP)
+        if (scsw_suspended(scsw))
             dev->pmcw.pnom = 0x00;
 
         /* Set the resume pending flag and signal the subchannel */
-        dev->scsw.flag2 |= SCSW2_AC_RESUM;
+        scsw_set_resume_pending(scsw);
         cc = schedule_ioq(NULL, dev);
     }
 
@@ -2558,36 +2478,50 @@ ARCH_DEP(raise_pci) (DEVBLK *dev,       /* -> Device block           */
                      BYTE ccwfmt,       /* CCW format (0 or 1)       */
                      U32 ccwaddr)       /* Main storage addr of CCW  */
 {
-#if !defined(FEATURE_CHANNEL_SUBSYSTEM)
+    SCSW*   scsw = &dev->pciscsw;
+
+    UNREFERENCED(ccwkey);
     UNREFERENCED(ccwfmt);
-#endif
 
     IODELAY(dev);
 
+    /* Obtain required locks */
     OBTAIN_INTLOCK(NULL);
     obtain_lock (&dev->lock);
 
     /* Save the PCI SCSW replacing any previous pending PCI; always
      * track the channel in channel subsystem mode
      */
-    dev->pciscsw.flag0 = ccwkey & SCSW0_KEY;
-    dev->pciscsw.flag1 = (ccwfmt == 1 ? SCSW1_F : 0);
-    dev->pciscsw.flag2 = SCSW2_FC_START;
-    dev->pciscsw.flag3 = SCSW3_AC_SCHAC | SCSW3_AC_DEVAC
-                       | SCSW3_SC_INTER | SCSW3_SC_PEND;
-    STORE_FW(dev->pciscsw.ccwaddr,ccwaddr);
-    dev->pciscsw.unitstat = 0;
-    dev->pciscsw.chanstat = CSW_PCI;
-    store_hw (dev->pciscsw.count, 0);
+    if (!scsw_status_pending(scsw))
+        memcpy(&scsw->word0, &dev->scsw.word0, sizeof(scsw->word0));
+    scsw_clear_Z(&dev->scsw);
+    scsw_clear_intermediate_status(&dev->scsw);
+    store_fw(scsw->ccwaddr, ccwaddr);
+    scsw->word[2] = 0;
+    scsw->chanstat = CSW_PCI;
+    scsw_set_flag3(SCSW3_AC_SCHAC | SCSW3_AC_DEVAC | SCSW3_SC_INTER);
 
-    /* Queue the PCI pending interrupt */
+    /* Prepare for I/O interrupt queue update */
     obtain_lock(&sysblk.iointqlk);
-    QUEUE_IO_INTERRUPT_QLOCKED(&dev->pciioint);
 
-    /* Update interrupt status */
+    /* If initial status interrupt pending (now with PCI), clear
+     * original interrupt and remove intermediate interrupt from the
+     * normal interrupt path.
+     */
+    if (scsw_I(&dev->scsw) &&
+        scsw_intermediate_pending(&dev->scsw))
+    {
+        dequeue_io_interrupt_qlocked(&dev->ioint);
+        scsw_clear_CC(&dev->scsw);
+    }
+
+    /* Queue the PCI pending interrupt and update interrupt status */
+    queue_io_interrupt_qlocked(&dev->pciioint);
     subchannel_interrupt_queue_cleanup(dev);
     UPDATE_IC_IOPENDING_QLOCKED();
     release_lock(&sysblk.iointqlk);
+
+    /* Release remaining locks and return */
     release_lock(&dev->lock);
     RELEASE_INTLOCK(NULL);
 
@@ -3571,7 +3505,7 @@ ARCH_DEP(device_attention) (DEVBLK *dev, BYTE unitstat)
 {
     obtain_lock (&dev->lock);
 
-    if (dev->hnd->attention) (dev->hnd->attention) (dev);
+    call_exit_locked(attention);
 
 #ifdef FEATURE_CHANNEL_SUBSYSTEM
     /* If subchannel not valid and enabled, do not present interrupt */
@@ -3584,22 +3518,20 @@ ARCH_DEP(device_attention) (DEVBLK *dev, BYTE unitstat)
 #endif /*FEATURE_CHANNEL_SUBSYSTEM*/
 
 
-    /* If device is already busy or interrupt pending */
-    if (dev->busy       ||
-        IOPENDING(dev)  ||
-        (dev->scsw.flag3 & SCSW3_SC_PEND))
+    /* If device is already busy or status pending */
+    if (dev->busy   ||
+        subchannel_status_pending(dev))
     {
         int rc;                         /* Return code               */
 
         /* Resume the suspended device with attention set            */
         /* SA22-7204-00:                                             */
         /*  p. 4-1, Attention                                        */
-        if(dev->scsw.flag3 & SCSW3_AC_SUSP)
+        if(scsw_suspended(&dev->scsw))
         {
-            dev->scsw.flag3 |= SCSW3_SC_ALERT |
-                               SCSW3_SC_PEND;
             dev->scsw.unitstat |= unitstat |= CSW_ATTN;
-            dev->scsw.flag2 |= SCSW2_AC_RESUM;
+            scsw_set_resume_pending(&dev->scsw);
+            scsw_set_alert_pending(&dev->scsw);
             schedule_ioq(NULL, dev);
             if (dev->ccwtrace || dev->ccwstep)
                 WRMSG (HHC01304, "I", SSID_TO_LCSS(dev->ssid),
@@ -3621,7 +3553,6 @@ ARCH_DEP(device_attention) (DEVBLK *dev, BYTE unitstat)
     release_lock(&dev->lock);
     OBTAIN_INTLOCK(NULL);
     obtain_lock(&dev->lock);
-    obtain_lock(&sysblk.iointqlk);
 
     /* Set SCSW for attention interrupt                              */
     /* SA22-7201-05:                                                 */
@@ -3642,23 +3573,25 @@ ARCH_DEP(device_attention) (DEVBLK *dev, BYTE unitstat)
     /*  p. 4-1, Attention                                            */
     /* GA22-6974-09:                                                 */
     /*  pp. 2-13 -- 2-14, Attention                                  */
-    dev->attnscsw.flag3 = SCSW3_SC_ALERT | SCSW3_SC_PEND;
-    store_fw (dev->attnscsw.ccwaddr, 0);
+    memset(&dev->attnscsw, 0, sizeof(SCSW));
+    scsw_set_alert_pending(&dev->attnscsw);
+    /* store_fw (dev->attnscsw.ccwaddr, 0); */
     dev->attnscsw.unitstat = unitstat;
-    dev->attnscsw.chanstat = 0;
-    store_hw (dev->attnscsw.count, 0);
+    /* ->attnscsw.chanstat = 0; */
+    /* store_hw (dev->attnscsw.count, 0); */
 
-    /* Queue the attention interrupt */
-    QUEUE_IO_INTERRUPT_QLOCKED(&dev->attnioint);
-
-    /* Update interrupt status */
+    /* Queue the attention interrupt and update interrupt status */
+    obtain_lock(&sysblk.iointqlk);
+    queue_io_interrupt_qlocked(&dev->attnioint);
     subchannel_interrupt_queue_cleanup(dev);
     UPDATE_IC_IOPENDING_QLOCKED();
     release_lock(&sysblk.iointqlk);
+
+    /* Release remaining locks and return */
     release_lock(&dev->lock);
     RELEASE_INTLOCK(NULL);
-
     return 0;
+
 } /* end function device_attention */
 
 
@@ -3701,19 +3634,15 @@ int     rc;                             /* Return code               */
 #endif
 
     /* Return condition code 1 if status pending */
-    if (unlikely((dev->scsw.flag3     & SCSW3_SC_PEND)  ||
-                 (dev->pciscsw.flag3  & SCSW3_SC_PEND)  ||
-                 (dev->attnscsw.flag3 & SCSW3_SC_PEND)  ||
-                 dev->tschpending))
+
+    if (unlikely(subchannel_status_pending(dev)))
     {
         release_lock (&dev->lock);
         return 1;
     }
 
-    /* Return condition code 2 if device is busy */
-    if (unlikely((dev->busy &&
-                  dev->ioactive == DEV_SYS_LOCAL)   ||
-                 dev->startpending))
+    /* Return condition code 2 if subchannel is busy */
+    if (unlikely(subchannel_busy(dev)))
     {
         release_lock (&dev->lock);
         return 2;
@@ -3730,23 +3659,21 @@ int     rc;                             /* Return code               */
 
     /* Initialize the subchannel status word */
     memset (&dev->scsw,     0, sizeof(SCSW));
-    dev->scsw.flag0 = (orb->flag4 & SCSW0_KEY);                /*@IWZ*/
-    if (orb->flag4 & ORB4_S) dev->scsw.flag0 |= SCSW0_S;       /*@IWZ*/
-    if (orb->flag5 & ORB5_F) dev->scsw.flag1 |= SCSW1_F;       /*@IWZ*/
-    if (orb->flag5 & ORB5_P) dev->scsw.flag1 |= SCSW1_P;       /*@IWZ*/
-    if (orb->flag5 & ORB5_I) dev->scsw.flag1 |= SCSW1_I;       /*@IWZ*/
-    if (orb->flag5 & ORB5_A) dev->scsw.flag1 |= SCSW1_A;       /*@IWZ*/
-    if (orb->flag5 & ORB5_U) dev->scsw.flag1 |= SCSW1_U;       /*@IWZ*/
+    dev->scsw.flag0 = (orb->flag4 & (ORB4_KEY   |
+                                     ORB4_S));
+    dev->scsw.flag1 = (orb->flag5 & (ORB5_F     |
+                                     ORB5_P     |
+                                     ORB5_I     |
+                                     ORB5_A     |
+                                     ORB5_U));
+
+    /* Set start pending */
+    scsw_set_start_pending(&dev->scsw);
 
     /* Set the device busy indicator */
-    set_subchannel_busy(dev);
+    subchannel_set_active(dev);
 
-    /* Initialize shadow SCSWs */
-    memcpy(&dev->pciscsw,  &dev->scsw, sizeof(SCSW));
-    memcpy(&dev->attnscsw, &dev->scsw, sizeof(SCSW));
-
-    /* Make the subchannel start-pending */
-    dev->scsw.flag2 |= SCSW2_FC_START | SCSW2_AC_START;
+    /* Maintain old flag */
     dev->startpending = 1;
 
     /* Copy the I/O parameter to the path management control word */
@@ -3764,6 +3691,17 @@ int     rc;                             /* Return code               */
         /* Original ORB size */
         memcpy(&dev->orb, orb, 12);
         memset(&dev->orb.csspriority, 0, sizeof(ORB) - 12);
+    }
+
+    /* Display the start and first three words of ORB */
+    if (dev->ccwtrace || dev->ccwstep)
+    {
+        U32 word[3] = {fetch_fw(&dev->orb),
+                       fetch_fw((BYTE*)((size_t)&dev->orb)+4),
+                       fetch_fw((BYTE*)((size_t)&dev->orb)+8)};
+
+        WRMSG (HHC01322, "I", SSID_TO_LCSS(dev->ssid), dev->devnum,
+                              word[0], word[1], word[2]);
     }
 
     /* Schedule the I/O for execution */
@@ -3785,6 +3723,7 @@ ARCH_DEP(execute_ccw_chain) (void *arg)
 {
 DEVBLK *dev = (DEVBLK*) arg;            /* Device Block pointer      */
 IOBUF  *iobuf;                          /* Pointer to I/O buffer     */
+SCSW   *scsw = &dev->scsw;              /* Pointer to normal SCSW    */
 int     sysid = DEV_SYS_LOCAL;          /* System Identifier         */
 U32     ccwaddr = 0;                    /* Address of CCW        @IWZ*/
 U32     ticaddr = 0;                    /* Previous CCW was a TIC    */
@@ -3828,25 +3767,47 @@ IOBUF iobuf_initial;                    /* Channel I/O buffer        */
 
 #if !defined(execute_ccw_chain_return)
 
-#define execute_ccw_chain_fast_return(_result)                         \
+#define execute_ccw_chain_fast_return                                  \
 do {                                                                   \
     if (iobuf != &iobuf_initial)                                       \
         iobuf_destroy(iobuf);                                          \
-    return (void*) (_result);                                          \
+    return (NULL);                                                     \
 } while(0)
 
-#define execute_ccw_chain_unlock_and_return(_result)                   \
+#define execute_ccw_chain_unlock_and_return                            \
 do {                                                                   \
-    clear_subchannel_busy(dev);                                        \
+    subchannel_clear_active(dev);                                      \
     release_lock(&dev->lock);                                          \
-    execute_ccw_chain_fast_return(_result);                            \
+    execute_ccw_chain_fast_return;                                     \
 } while(0)
 
-#define execute_ccw_chain_return(_result)                              \
+#define execute_ccw_chain_return                                       \
 do {                                                                   \
     obtain_lock(&dev->lock);                                           \
-    execute_ccw_chain_unlock_and_return(_result);                      \
+    execute_ccw_chain_unlock_and_return;                               \
 } while(0)
+
+#define execute_ccw_chain_check_for_halt_or_clear                      \
+do {                                                                   \
+    if (scsw_halt_or_clear_pending(scsw))                              \
+    {                                                                  \
+        if (scsw_halt_pending(scsw))                                   \
+            goto execute_halt;                                         \
+        goto execute_clear;                                            \
+    }                                                                  \
+} while (0)
+
+#define execute_ccw_chain_dequeue_for_halt_or_clear                    \
+do {                                                                   \
+    if (scsw_halt_or_clear_pending(scsw))                              \
+    {                                                                  \
+        release_lock(&dev->lock);                                      \
+        RELEASE_INTLOCK(NULL);                                         \
+        if (scsw_halt_pending(scsw))                                   \
+            goto execute_halt;                                         \
+        goto execute_clear;                                            \
+    }                                                                  \
+} while (0)
 #endif
 
     /* Initialize prefetch */
@@ -3872,40 +3833,25 @@ do {                                                                   \
             wait_condition(&dev->iocond, &dev->lock);
             dev->iowaiters--;
         }
-        set_subchannel_busy(dev);
+        subchannel_set_active(dev);
         dev->ioactive = sysid;
         if (sysid == DEV_SYS_LOCAL)
             dev->startpending = 0;
     }
     else
     {
-        set_subchannel_busy(dev);
+        subchannel_set_active(dev);
         dev->ioactive = DEV_SYS_LOCAL;
         dev->startpending = 0;
     }
 
-    /* Increment excp count */
-    dev->excps++;
-
-    /* Indicate that we're started */
-    dev->scsw.flag2 |= SCSW2_FC_START;
-    dev->scsw.flag2 &= ~SCSW2_AC_START;
-
-    /* Handle early clear or halt */
-    if (dev->scsw.flag2 & (SCSW2_AC_CLEAR | SCSW2_AC_HALT))
-    {
-        release_lock(&dev->lock);
-        if (dev->scsw.flag2 & SCSW2_AC_CLEAR)
-            goto execute_clear;
-        goto execute_halt;
-    }
-
     /* For hercules `resume' resume suspended state */
-    if (dev->resumesuspended || dev->suspended ||
-        (dev->scsw.flag2 & SCSW2_AC_RESUM))
+    if (scsw_resume_pending(scsw)   ||
+        dev->resumesuspended        ||
+        dev->suspended)
     {
         /* Restore CCW execution variables */
-        ccwaddr = dev->ccwaddr;
+        ccwaddr = dev->ccwaddr - 8;     /* Refetch the suspended CCW */
         idapmask = dev->idapmask;
         idawfmt = dev->idawfmt;
         ccwfmt = dev->ccwfmt;
@@ -3914,7 +3860,7 @@ do {                                                                   \
 
         /* Turn the `suspended' bits off */
         dev->suspended =
-        dev->resumesuspended=0;
+        dev->resumesuspended = 0;
 
         /* Wait for the device to become available */
         while (dev->ioactive != DEV_SYS_NONE
@@ -3924,10 +3870,21 @@ do {                                                                   \
             wait_condition(&dev->iocond, &dev->lock);
             dev->iowaiters = MAX(0, dev->iowaiters - 1);
         }
-        dev->ioactive = sysid;
-        set_device_busy(dev);
 
-        if (dev->ccwtrace || dev->ccwstep || tracethis)
+        dev->ioactive = sysid;
+        device_set_active(dev);
+
+        /* Dispatch to HALT or CLEAR routine */
+        if (scsw_halt_or_clear_pending(scsw))
+        {
+            dev->excps++;
+            release_lock(&dev->lock);
+            if (scsw_halt_pending(scsw))
+                goto execute_halt;
+            goto execute_clear;
+        }
+
+        if (dev->ccwtrace || dev->ccwstep)
         {
             if (dev->s370start)
             {
@@ -3943,70 +3900,84 @@ do {                                                                   \
             }
         }
 
-        /* Reset the suspended status in the SCSW */
-        dev->scsw.flag2 &= ~SCSW2_AC_RESUM;
-        dev->scsw.flag3 &= ~(SCSW3_AC_SUSP  |
-                             SCSW3_SC_ALERT |
-                             SCSW3_SC_INTER |
-                             SCSW3_SC_PEND);
-        dev->scsw.flag3 |= (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC);
+        /* Call the I/O resume exit */
+        call_exit_locked(resume);
 
-        /* Call the i/o resume exit if not clearing */
-        if (!(dev->scsw.flag2 & SCSW2_AC_CLEAR))
+        /* Dispatch to HALT or CLEAR routine */
+        if (scsw_halt_or_clear_pending(scsw))
         {
-            /* Don't execute resume exit if S/370 channel start */
-            if (!dev->s370start &&
-                dev->hnd->resume)
-                (dev->hnd->resume) (dev);
-
-            /* Refetch the suspended CCW */
-            ccwaddr -= 8;
+            dev->s370start = 0;
+            dev->excps++;
+            release_lock(&dev->lock);
+            if (scsw_halt_pending(scsw))
+                goto execute_halt;
+            goto execute_clear;
         }
 
         /* Reset S/370 channel SIO resume indicator */
         dev->s370start = 0;
 
-        goto resume_suspend;
+        /* Indicate started */
+        scsw_set_start_function(scsw);
+
     }
 
-    /* Hercules deviation; always zero the SCSW CCW address to start */
-    store_fw(dev->scsw.ccwaddr, 0);
-
-    /* Call the i/o start exit */
-#ifdef OPTION_SYNCIO
-    if (!dev->syncio_retry && dev->hnd->start)
-#else // OPTION_NOSYNCIO
-    if (dev->hnd->start)
-#endif // OPTION_SYNCIO
+    else
     {
-        release_lock (&dev->lock);
-        (dev->hnd->start) (dev);
-        obtain_lock (&dev->lock);
+        /* Extract remaining I/O parameters from the ORB */
+        FETCH_FW(ccwaddr, dev->orb.ccwaddr);
+        dev->ccwaddr = ccwaddr;
+        dev->ccwfmt = ccwfmt = (dev->orb.flag5 & ORB5_F) ? 1 : 0;
+        dev->ccwkey = ccwkey = dev->orb.flag4 & ORB4_KEY;
+        dev->idawfmt = idawfmt = (dev->orb.flag5 & ORB5_H) ? 2 : 1;
+        STORE_FW(dev->scsw.ccwaddr, ccwaddr);
+
+        /* Determine IDA page size */
+        if (idawfmt == 2)
+        {
+            /* Page size is 2K or 4K depending on flag bit */
+            idapmask = (dev->orb.flag5 & ORB5_T) ?
+                       0x7FF : 0xFFF;
+        }
+        else
+        {
+            /* Page size is always 2K for format-1 IDAW */
+            idapmask = 0x7FF;
+        }
+
+        /* Dispatch to HALT or CLEAR routine */
+        if (scsw_halt_or_clear_pending(scsw))
+        {
+            dev->excps++;
+            release_lock(&dev->lock);
+            if (scsw_halt_pending(scsw))
+                goto execute_halt;
+            goto execute_clear;
+        }
+
+        /* Set initial status */
+        scsw_set_start_function(scsw);
+
+        /* Set initial status interrupt, if required */
+        if (scsw_I(scsw))
+        {
+            scsw_set_Z(scsw);
+            scsw_set_intermediate_pending(scsw);
+        }
+
+        /* Call the i/o start exit */
+#ifdef OPTION_SYNCIO
+        if (!dev->syncio_retry && (dev->hnd->start != NULL))
+#else // OPTION_NOSYNCIO
+        if (dev->hnd->start != NULL)
+#endif // OPTION_SYNCIO
+        {
+            (dev->hnd->start) (dev);
+        }
     }
 
-    /* Extract the I/O parameters from the ORB */              /*@IWZ*/
-    FETCH_FW(ccwaddr, dev->orb.ccwaddr);                       /*@IWZ*/
-    dev->ccwaddr = ccwaddr;
-    dev->ccwfmt = ccwfmt = (dev->orb.flag5 & ORB5_F) ? 1 : 0;
-    dev->ccwkey = ccwkey = dev->orb.flag4 & ORB4_KEY;
-    dev->idawfmt = idawfmt = (dev->orb.flag5 & ORB5_H) ? 2 : 1;
-
-    /* Determine IDA page size */                              /*@IWZ*/
-    if (idawfmt == 2)                                          /*@IWZ*/
-    {                                                          /*@IWZ*/
-        /* Page size is 2K or 4K depending on flag bit */      /*@IWZ*/
-        idapmask =                                             /*@IWZ*/
-            (dev->orb.flag5 & ORB5_T) ? 0x7FF : 0xFFF;         /*@IWZ*/
-    } else {                                                   /*@IWZ*/
-        /* Page size is always 2K for format-1 IDAW */         /*@IWZ*/
-        idapmask = 0x7FF;                                      /*@IWZ*/
-    }                                                          /*@IWZ*/
-
-
-resume_suspend:
-
-    /* Turn off the start pending bit in the SCSW */
-    dev->scsw.flag2 &= ~SCSW2_AC_START;
+    /* Increment excp count */
+    dev->excps++;
 
 #ifdef OPTION_SYNCIO
     /* Check for retried synchronous I/O */
@@ -4049,7 +4020,7 @@ resume_suspend:
 #ifdef FEATURE_CHANNEL_SUBSYSTEM
     /* Update the measurement block if applicable */
     if (_IOA_MBM && (dev->pmcw.flag5 & PMCW5_MM_MBU) &&
-        !(dev->scsw.flag2 & (SCSW2_AC_CLEAR | SCSW2_AC_HALT)))
+        !(scsw_halt_or_clear_pending(&dev->scsw)))
     {
         mbaddr = _IOA_MBO;
         mbaddr += (dev->pmcw.mbi[0] << 8 | dev->pmcw.mbi[1]) << 5;
@@ -4062,7 +4033,9 @@ resume_suspend:
             FETCH_HW(mbcount,mbk->srcount);
             mbcount++;
             STORE_HW(mbk->srcount,mbcount);
-        } else {
+        }
+        else
+        {
             /* Generate subchannel logout indicating program
                check or protection check, and set the subchannel
                measurement-block-update-enable to zero */
@@ -4081,15 +4054,25 @@ resume_suspend:
     while ( chain )
     {
         /* Test for clear subchannel request */
-        if (dev->scsw.flag2 & SCSW2_AC_CLEAR)
+        if (scsw_clear_pending(scsw))
         {
 
             /* No I/O delays are to be taken during clear operations */
 
             /* Call the i/o end exit */
-            if (dev->hnd->end) (dev->hnd->end) (dev);
+            call_exit(end);
 
 execute_clear:
+
+            obtain_lock(&dev->lock);
+            scsw_set_clear_function(scsw);
+
+            /* Call the HALT device handler */
+            /* FIXME: Add a CLEAR device handler */
+            call_exit_locked(halt);
+
+            release_lock(&dev->lock);
+
             /* Get necessary locks */
             OBTAIN_INTLOCK(NULL);
             obtain_lock(&dev->lock);
@@ -4097,21 +4080,22 @@ execute_clear:
             /* Execute clear function */
             perform_clear_subchan(dev);
 
+            /* FIXME: Should be in the CLEAR device handler */
+            dev->reserved = 0;
+
             /* Release locks */
             release_lock(&dev->lock);
             RELEASE_INTLOCK(NULL);
 
             /* Return */
-            execute_ccw_chain_fast_return(NULL);
+            execute_ccw_chain_fast_return;
         } /* end perform clear subchannel */
 
         /* Test for halt subchannel request */
-        if (dev->scsw.flag2 & SCSW2_AC_HALT)
+        if (scsw_halt_pending(scsw))
         {
-            IODELAY(dev);
-
             /* Call the i/o end exit */
-            if (dev->hnd->end) (dev->hnd->end) (dev);
+            call_exit(end);
 
 execute_halt:
             perform_halt(dev);
@@ -4120,22 +4104,21 @@ execute_halt:
                 WRMSG (HHC01309, "I", SSID_TO_LCSS(dev->ssid),
                                       dev->devnum);
 
-            execute_ccw_chain_fast_return(NULL);
+            execute_ccw_chain_fast_return;
         } /* end perform halt subchannel */
 
         /* Test for attention status from device */
-        if (dev->scsw.flag3 & SCSW3_SC_ALERT)
+        if (scsw_alert_pending(scsw))
         {
             IODELAY(dev);
 
-            /* Call the i/o end exit */
-            if (dev->hnd->end) (dev->hnd->end) (dev);
-
             obtain_lock (&dev->lock);
 
-            /* Turn off busy bit, turn on pending bit */
-            clear_subchannel_busy(dev);
-//          dev->pending = 1;
+            /* Call the i/o end exit */
+            call_exit_locked(end);
+
+            /* Turn off busy bit */
+            subchannel_clear_active(dev);
 
             /* Queue the pending interrupt and update status */
             release_lock (&dev->lock);
@@ -4145,8 +4128,15 @@ execute_halt:
                 WRMSG (HHC01307, "I", SSID_TO_LCSS(dev->ssid),
                                       dev->devnum);
 
-            execute_ccw_chain_fast_return(NULL);
+            execute_ccw_chain_fast_return;
         } /* end attention processing */
+
+        /* Queue or requeue any other pending interrupt */
+        else if (scsw_status_pending(scsw))
+        {
+            IODELAY(dev);
+            queue_io_interrupt_and_update_status(dev);
+        }
 
         /* Clear the channel status and unit status, unless skipping
            to end of chain data */
@@ -4295,8 +4285,9 @@ execute_halt:
 #ifdef OPTION_SYNCIO
             !dev->syncio_retry &&
 #endif // OPTION_SYNCIO
-            (flags & CCW_FLAGS_PCI) /*-- Debug &&
-            !prefetch.seq --*/)
+            (flags & CCW_FLAGS_PCI) &&
+            !IS_CCW_TIC(opcode)
+            /*-- Debug && !prefetch.seq --*/)
         {
             ARCH_DEP(raise_pci) (dev, ccwkey, ccwfmt, ccwaddr);
         }
@@ -4345,7 +4336,7 @@ execute_halt:
         /*-------------------------------------------------------------
         //
         // Note: With CD check first, this test will always be false.
-        //       Code left here in comment for documentation purposes.
+        //       Code left here as comment for documentation purposes.
         //
         // if (flags & (CCW_FLAGS_CC | CCW_FLAGS_CD) ==
         //             (CCW_FLAGS_CC | CCW_FLAGS_CD))
@@ -4358,7 +4349,7 @@ execute_halt:
         /*-------------------------------------------------------------
         //
         // Note: With CD check first, this test will always be false.
-        //       Code left here in comment for documentation purposes.
+        //       Code left here as comment for documentation purposes.
         //
         // if (flags & (CCW_FLAGS_CD | CCW_FLAGS_SLI)) ==
         //             (CCW_FLAGS_CD | CCW_FLAGS_SLI)))
@@ -4371,7 +4362,7 @@ execute_halt:
         /*-------------------------------------------------------------
         //
         // Note: Check against MIDAW down in MIDAW validation section.
-        //       Code left here in comment for documentation purposes.
+        //       Code left here as comment for documentation purposes.
         //
         // if (flags & CCW_FLAGS_SKIP)
         // {}
@@ -4383,7 +4374,7 @@ execute_halt:
         /*-------------------------------------------------------------
         //
         // Note: No validation required.
-        //       Code left here in comment for documentation purposes.
+        //       Code left here as comment for documentation purposes.
         //
         // if (flags & CCW_FLAGS_PCI)
         // {}
@@ -4421,7 +4412,7 @@ execute_halt:
          && !dev->is_immed && !IS_CCW_SENSE(dev->code))
         {
             dev->syncio_retry = 1;
-            execute_ccw_chain_return(NULL);
+            execute_ccw_chain_return;
         }
 #endif // OPTION_SYNCIO
 
@@ -4445,72 +4436,33 @@ execute_halt:
             if (dev->syncio_active)
             {
                 dev->syncio_retry = 1;
-                execute_ccw_chain_return(NULL);
+                execute_ccw_chain_return;
             }
 #endif // OPTION_SYNCIO
 
             IODELAY(dev);
 
             /* If halt or clear, abort suspend operation */
-            if (dev->scsw.flag2 & (SCSW2_AC_HALT | SCSW2_AC_CLEAR))
-            {
-                if (dev->scsw.flag2 & SCSW2_AC_HALT)
-                    goto execute_halt;
-                goto execute_clear;
-            }
+            execute_ccw_chain_check_for_halt_or_clear;
 
             /* Call the i/o suspend exit */
-            if (dev->hnd->suspend) (dev->hnd->suspend) (dev);
+            call_exit(suspend);
 
             OBTAIN_INTLOCK(NULL);
             obtain_lock (&dev->lock);
+//          execute_ccw_chain_dequeue_for_halt_or_clear;                        /*** Debug ***/
 
             /* Suspend the device if not already resume pending */
-            if (!(dev->scsw.flag2 & (SCSW2_AC_RESUM)))
+            if (!scsw_resume_pending(scsw))
             {
-                /* Clean up device and complete suspension exit */
-                clear_subchannel_busy(dev);
-
-                /* Set the subchannel status word to suspended       */
-                /* SA22-7201-05:                                     */
-                /*  p. 16-15, Subchannel-Active (Bit 24)             */
-                /*  pp. 16-15 -- 16-16, Device-Active (Bit 25)       */
-                /*  p. 16-16, Suspended (Bit 26)                     */
-                /*  p. 16-16, Alert Status (Bit 27)                  */
-                /*  p. 16-17, Intermediate Status (Bit 28)           */
-                /*  p. 16-18, Status-Pending (Bit 31)                */
-                dev->scsw.flag3 &= ~(SCSW3_AC_SCHAC |
-                                     SCSW3_AC_DEVAC);
-                dev->scsw.flag3 |= SCSW3_AC_SUSP;
-                /* Principles violation. Some operating systems use
-                 * CLI to check for suspend, intermediate and pending
-                 * status (x'29') instead of the Principles statement
-                 * with alert status set (x'39'). This also appears to
-                 * be consistent with older machines.
-                 * FIXME: Place conformance in user configuration?
-                 *        flag3 |= SCSW3_SC_ALERT;
-                 */
-
-                dev->scsw.unitstat = 0;
-
+                /* If PCI also specified, merge into status */
                 if (flags & CCW_FLAGS_PCI)
-                {
                     dev->scsw.chanstat   = CSW_PCI;
-                    dev->scsw.flag3     |= SCSW3_SC_INTER   |
-                                           SCSW3_SC_PEND;
-                    dev->pciscsw.flag3  &= ~SCSW3_SC_PEND;
-                }
-                else
-                {
-                    dev->scsw.chanstat   = 0;
-                    if (!(dev->scsw.flag1 & SCSW1_U))
-                        dev->scsw.flag3 |= SCSW3_SC_INTER   |
-                                           SCSW3_SC_PEND;
-                }
 
+                /* Set count to the requested count */
                 STORE_HW(dev->scsw.count,count);
 
-                /* Update local copy of ORB */
+                /* Update local copy of ORB for resume processing */
                 STORE_FW(dev->orb.ccwaddr, (ccwaddr-8));
 
                 /* Preserve CCW execution variables for validation */
@@ -4520,10 +4472,15 @@ execute_halt:
                 dev->ccwfmt = ccwfmt;
                 dev->ccwkey = ccwkey;
 
-                /* Turn on the "suspended" bit.  This enables remote
+                /* Turn on "suspended" status.  This enables remote
                  * systems to use the device while we're waiting
                  */
-                dev->suspended = 1;
+                subchannel_set_suspended(dev);
+                if (firstccw && !scsw_alert_pending(scsw))
+                {
+                    WRMSG (HHC90000, "I", "SCSW Alert not set on suspend");
+                    scsw_set_alert_pending(scsw);
+                }
 
                 /* Trace suspension point */
                 if (unlikely(dev->ccwtrace || dev->ccwstep || tracethis))
@@ -4535,24 +4492,17 @@ execute_halt:
 #endif // OPTION_SYNCIO
 
                 /* Present the interrupt and return */
-                if (dev->scsw.flag3 & SCSW3_SC_PEND)
+                if (scsw_status_pending(scsw))
                     queue_io_interrupt_and_update_status_locked(dev);
 
                 release_lock(&dev->lock);
                 RELEASE_INTLOCK(NULL);
 
-                if (dev->scsw.flag2 & (SCSW2_AC_CLEAR | SCSW2_AC_HALT))
-                {
-                    if (dev->scsw.flag2 & SCSW2_AC_CLEAR)
-                        goto execute_clear;
-                    goto execute_halt;
-                }
-
-                execute_ccw_chain_fast_return(NULL);
+                execute_ccw_chain_check_for_halt_or_clear;
+                execute_ccw_chain_fast_return;
             }
 
             release_lock (&dev->lock);
-            RELEASE_INTLOCK(NULL);
 
         } /* end if(CCW_FLAGS_SUSP) */
 
@@ -4652,12 +4602,12 @@ execute_halt:
             dev->ccwkey = ccwkey;
 
             /* Set the resume pending flag and signal the subchannel */
-            dev->scsw.flag2 |= SCSW2_AC_RESUM;
+            scsw_set_resume_pending(scsw);
             schedule_ioq(NULL, dev);
 
             /* Leave device as busy, unlock device and return */
             release_lock(&dev->lock);
-            execute_ccw_chain_fast_return(NULL);
+            execute_ccw_chain_fast_return;
         }
 
         /* Handle initial status settings on first non-immediate CCW */
@@ -4673,35 +4623,37 @@ execute_halt:
             /* SA22-7201-05:                                         */
             /*  p. 16-14, Subchannel-Active                          */
             /*  pp. 16-14 -- 16-15, Device-Active                    */
-            dev->scsw.flag3 |= (SCSW3_AC_SCHAC | SCSW3_AC_DEVAC);
+            device_set_active(dev);
 
             /* Process Initial-Status-Interruption Request           */
             /* SA22-7201-05:                                         */
             /*  p. 16-11, Zero Condition Code                        */
 #ifdef OPTION_SYNCIO
-            if ((dev->scsw.flag1 & SCSW1_I) && !dev->syncio_retry)
+            if (scsw_I(scsw) && !dev->syncio_retry)
 #else // OPTION_NOSYNCIO
-            if (dev->scsw.flag1 & SCSW1_I)
+            if (scsw_I(scsw))
 #endif // OPTION_SYNCIO
             {
+                execute_ccw_chain_check_for_halt_or_clear;
+
                 obtain_lock (&dev->lock);
+                execute_ccw_chain_dequeue_for_halt_or_clear;
 
                 /* Update the CCW address in the SCSW */
                 STORE_FW(dev->scsw.ccwaddr,ccwaddr);
 
                 /* Set the zero condition-code flag in the SCSW */
-                dev->scsw.flag1 |= SCSW1_Z;
-
-                /* Set intermediate status in the SCSW */
-                dev->scsw.flag3 |= (SCSW3_SC_INTER | SCSW3_SC_PEND);
+                scsw_set_CC(scsw, 0);
 
                 /* Queue the interrupt and update interrupt status */
-                release_lock(&dev->lock);
-                queue_io_interrupt_and_update_status(dev);
+                queue_io_interrupt_and_update_status_locked(dev);
 
                 if (dev->ccwtrace || dev->ccwstep || tracethis)
                     WRMSG (HHC01306, "I", SSID_TO_LCSS(dev->ssid),
                                           dev->devnum);
+
+                /* Release the lock */
+                release_lock(&dev->lock);
             }
         }
 
@@ -4843,13 +4795,22 @@ prefetch:
         /* Set chaining flag */
         chain = ( flags & (CCW_FLAGS_CD | CCW_FLAGS_CC) ) ? 1 : 0;
 
-        /* If first in sequence, begin execution and channel data
+        /* If not skipping CCWs, begin execution and channel data
            transfer */
         if (!skip_ccws)
         {
             /* Initialize residual byte count */
             residual = count;
             more = bufpos = unitstat = chanstat = 0;
+
+            /* Set device active */
+            if (firstccw)
+            {
+                obtain_lock(&dev->lock);
+                execute_ccw_chain_dequeue_for_halt_or_clear;
+                subchannel_set_device_active(dev);
+                release_lock(&dev->lock);
+            }
 
             /* Pass the CCW to the device handler for execution */
             dev->iobuf.length = iobuf->size;
@@ -4864,7 +4825,13 @@ prefetch:
 #ifdef OPTION_SYNCIO
             /* Check if synchronous I/O needs to be retried */
             if (dev->syncio_active && dev->syncio_retry)
-                execute_ccw_chain_unlock_and_return(NULL);
+            {
+                obtain_lock(&dev->lock);
+                execute_ccw_chain_dequeue_for_halt_or_clear;
+                subchannel_clear_device_active(dev);
+                release_lock(&dev->lock);
+                execute_ccw_chain_fast_return;
+            }
             /*
              * NOTE: syncio_retry is left on for asynchronous I/O
              * until after the first call to the execute ccw device
@@ -5158,16 +5125,19 @@ breakchain:
         if (chanstat != 0
             || (unitstat & ~CSW_SM) != (CSW_CE | CSW_DE))
         {
-            if (firstccw &&
-                !dev->is_immed &&
-                (dev->scsw.flag1 & SCSW1_I)
-#ifdef OPTION_SYNCIO
-                && !dev->syncio_retry
-#endif // OPTION_SYNCIO
-            )
+            if (firstccw)
             {
-                /* Set the zero condition-code flag in the SCSW */
-                dev->scsw.flag1 |= SCSW1_Z;
+                if (!dev->is_immed &&
+                    scsw_I(scsw)
+#ifdef OPTION_SYNCIO
+                    && !dev->syncio_retry
+#endif // OPTION_SYNCIO
+                    )
+                {
+                    /* Set the zero condition-code flag in the SCSW */
+                    scsw_set_CC(scsw, 0);
+                }
+
                 firstccw = 0;
             }
             chain = 0;
@@ -5197,22 +5167,33 @@ breakchain:
 
         }
 
-        /* If Halt or Clear Pending, restart chaining to reset */
-        if (dev->scsw.flag2 & (SCSW2_AC_HALT | SCSW2_AC_CLEAR))
-            chain = 1;
-
     } /* end while(chain) */
 
     IODELAY(dev);
 
     /* Call the i/o end exit */
-    if (dev->hnd->end) (dev->hnd->end) (dev);
+    call_exit(end);
 
+    OBTAIN_INTLOCK(NULL);
     obtain_lock (&dev->lock);
+    execute_ccw_chain_dequeue_for_halt_or_clear;
 
     /* Complete the subchannel status word */
-    dev->scsw.flag3 &= ~(SCSW3_AC_SCHAC | SCSW3_AC_DEVAC | SCSW3_SC_INTER);
-    dev->scsw.flag3 |= (SCSW3_SC_PRI | SCSW3_SC_SEC | SCSW3_SC_PEND);
+    if (scsw_start_function(scsw))
+    {
+        scsw_set_primary_status(scsw);
+        scsw_clear_subchannel_active(scsw);
+    }
+
+    if ((unitstat & ~(CSW_ATTN | CSW_SM))   ||
+        chanstat)
+    {
+        scsw_set_secondary_status(scsw);
+        scsw_clear_device_active(scsw);
+    }
+
+    scsw_clear_intermediate_status(scsw);
+
     STORE_FW(dev->scsw.ccwaddr,ccwaddr);
     dev->scsw.unitstat = unitstat;
     dev->scsw.chanstat = chanstat;
@@ -5220,7 +5201,7 @@ breakchain:
 
     /* Set alert status if terminated by any unusual condition */
     if (chanstat != 0 || unitstat != (CSW_CE | CSW_DE))
-        dev->scsw.flag3 |= SCSW3_SC_ALERT;
+        scsw_set_alert_pending(scsw);
 
     /* Clear the Extended Status Word (ESW) and set LPUM in Word 0,
        defaulting to a Format-1 ESW if no other action taken */
@@ -5269,30 +5250,26 @@ breakchain:
         dev->sns_pending = 0;
     }
 
-    /* Late notification. If halt or clear in process, go clear the  */
-    /* mess.                                                         */
-    if (dev->scsw.flag2 & (SCSW2_AC_HALT | SCSW2_AC_CLEAR))
-    {
-        release_lock(&dev->lock);
-        if (dev->scsw.flag2 & SCSW2_AC_HALT)
-            goto execute_halt;
-        goto execute_clear;
-    }
-
 #ifdef OPTION_SYNCIO
     if (dev->regs) dev->regs->hostregs->syncio = 0;
 #endif // OPTION_SYNCIO
 
     /* Present the interrupt and return */
-    release_lock (&dev->lock);
-    queue_io_interrupt_and_update_status(dev);
-    execute_ccw_chain_return(NULL);
+    if (scsw_status_pending(&dev->scsw))
+        queue_io_interrupt_and_update_status_locked(dev);
 
+    /* Release remaining locks */
+    release_lock(&dev->lock);
+    RELEASE_INTLOCK(NULL);
+
+    /* Return */
+    execute_ccw_chain_return;
+
+    #undef execute_ccw_chain_dequeue_for_halt_or_clear
+    #undef execute_ccw_chain_check_for_halt_or_clear
     #undef execute_ccw_chain_return
     #undef execute_ccw_chain_fast_return
     #undef execute_ccw_chain_unlock_and_return
-
-    return NULL;
 } /* end function execute_ccw_chain */
 
 
@@ -5433,9 +5410,10 @@ int
 ARCH_DEP(present_io_interrupt) (REGS *regs, U32 *ioid,
                                 U32 *ioparm, U32 *iointid, BYTE *csw)
 {
-IOINT  *io, *io2;                       /* -> I/O interrupt entry    */
-DEVBLK *dev;                            /* -> Device control block   */
-int     icode = 0;                      /* Intercept code            */
+    IOINT  *io, *io2;                   /* -> I/O interrupt entry    */
+    DEVBLK *dev;                        /* -> Device control block   */
+    int     icode = 0;                  /* Intercept code            */
+    SCSW*   scsw;                       /* SCSW                      */
 
     UNREFERENCED_370(ioparm);
     UNREFERENCED_370(iointid);
@@ -5487,6 +5465,12 @@ retry:
         ASSERT(dev == NULL);
         for (io = sysblk.iointq; io != NULL; io = io->next)
         {
+            /* Can't present interrupt while TEST SUBCHANNEL required
+             * (interrupt already presented for this device)
+             */
+            if (io->dev->tschpending)
+                continue;
+
             /* Exit loop if pending interrupts from this device */
             if ((icode = ARCH_DEP(interrupt_enabled)(regs, io->dev)))
             {
@@ -5535,6 +5519,7 @@ retry:
     FETCH_FW(*ioparm,dev->pmcw.intparm);
 #if defined(FEATURE_ESAME) || defined(_FEATURE_IO_ASSIST)
 #if defined(FEATURE_QDIO_THININT)
+    ASSERT(scsw_Q(&dev->pciscsw));
     if (unlikely(FACILITY_ENABLED(QDIO_THININT, regs)
         && (dev->pciscsw.flag2 & SCSW2_Q) && dev->qdio.thinint) )
     {
@@ -5561,12 +5546,15 @@ retry:
 
         if(!SIE_MODE(regs) || icode != SIE_INTERCEPT_IOINTP)
         {
+            scsw = &dev->pciscsw;
+
             /* Clear the pending PCI status */
-            dev->pciscsw.flag2 &= ~(SCSW2_FC | SCSW2_AC);
-            dev->pciscsw.flag3 &= ~(SCSW3_SC);
+            scsw_clear_flag2(SCSW2_FC | SCSW2_AC);
+            scsw_clear_flag3(SCSW3_SC);
+            dev->pcipending = 0;
 
             /* Dequeue the interrupt */
-            DEQUEUE_IO_INTERRUPT_QLOCKED(&dev->pciioint);
+            dequeue_io_interrupt_qlocked(&dev->pciioint);
         }
     }
     else
@@ -5601,7 +5589,18 @@ retry:
             dev->pmcw.flag27 &= ~PMCW27_I;
 
         /* Dequeue the interrupt */
-        DEQUEUE_IO_INTERRUPT_QLOCKED(io);
+//      dequeue_io_interrupt_qlocked(io);
+    }
+
+    /* Perform I/O queue cleanup if CLEAR function */
+    if (scsw_clear_function(&dev->scsw))
+    {
+        dequeue_io_interrupt_qlocked(&dev->pciioint);
+        dequeue_io_interrupt_qlocked(&dev->attnioint);
+        scsw_clear_status(&dev->pciscsw);
+        scsw_clear_status(&dev->attnscsw);
+        scsw_set_status_pending(&dev->scsw);
+        io = &dev->ioint;
     }
 
     /* TEST SUBCHANNEL is now required to clear the interrupt */
@@ -5614,7 +5613,6 @@ retry:
         {
             IOINT*  ioint;              /* -> I/O interrupt          */
             IRB     irb;                /* -> IRB                    */
-            SCSW*   scsw;               /* -> SCSW                   */
             int     cc;                 /* Condition code ignored    */
 
             /* Extract the I/O address and CSW */
@@ -5634,22 +5632,20 @@ retry:
 #if DEBUG_SCSW
     if (unlikely(dev->ccwtrace))
     {
-        SCSW*   scsw;                   /* SCSW to validate          */
-
         /* Select SCSW */
-        if (dev->pciscsw.flag3 & SCSW3_SC_PEND)
+        if (scsw_status_pending(&dev->pciscsw))
             scsw = &dev->pciscsw;
-        else if (dev->scsw.flag3 & SCSW3_SC_PEND)
+        else if (scsw_status_pending(&dev->scsw))
             scsw = &dev->scsw;
-     /* else if (dev->attnscsw.flag3 & SCSW3_SC_PEND)   */
-     /*     scsw = &dev->attnscsw;                      */
+        else if (scsw_status_pending(&dev->attnscsw))
+            scsw = &dev->attnscsw;
         else
             scsw = NULL;
 
         /* Check interrupt validity */
-        if (scsw != NULL                            &&
-            !(scsw->flag2 & (SCSW2_FC | SCSW2_AC))  &&
-            !(scsw->flag3 & SCSW3_AC))
+        if (scsw != NULL                        &&
+            !scsw_flag2(SCSW2_FC | SCSW2_AC)    &&
+            !scsw_flag3(SCSW3_AC))
         {
             WRMSG(HHC90000, "E", "  CHAN: Invalid SCSW presentation");
             display_scsw(dev, *scsw);
@@ -5804,7 +5800,8 @@ DEVLIST *pZoneDevs = NULL;              /* devices in requested zone */
 DLL_EXPORT int
 device_attention (DEVBLK *dev, BYTE unitstat)
 {
-    switch(sysblk.arch_mode) {
+    switch(sysblk.arch_mode)
+    {
 #if defined(_370)
         case ARCH_370:
             /* Do NOT raise if initial power-on state */
