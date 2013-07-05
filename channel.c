@@ -1006,7 +1006,7 @@ int      pending = 0;                   /* New interrupt pending     */
         obtain_lock(&sysblk.iointqlk);
         queue_io_interrupt_qlocked (&dev->ioint);
         subchannel_interrupt_queue_cleanup(dev);
-        UPDATE_IC_IOPENDING();
+        UPDATE_IC_IOPENDING_QLOCKED();
         release_lock(&sysblk.iointqlk);
         RELEASE_INTLOCK(regs);
     }
