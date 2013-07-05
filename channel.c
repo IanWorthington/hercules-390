@@ -4497,11 +4497,6 @@ execute_halt:
                  * systems to use the device while we're waiting
                  */
                 subchannel_set_suspended(dev);
-                if (firstccw && !scsw_alert_pending(scsw))
-                {
-                    WRMSG (HHC90000, "I", "SCSW Alert not set on suspend");
-                    scsw_set_alert_pending(scsw);
-                }
 
                 /* Trace suspension point */
                 if (unlikely(dev->ccwtrace || dev->ccwstep || tracethis))
