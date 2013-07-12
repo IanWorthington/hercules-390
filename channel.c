@@ -963,7 +963,7 @@ int      pending = 0;                   /* New interrupt pending     */
             signal_subchannel_halt_or_clear_pending(dev, SCSW2_AC_HALT);
         }
     }
-    else if (!subchannel_status_pending(dev) && dev->ctctype != CTC_LCS)
+    else if (!subchannel_status_pending(dev))
     {
         /* Set condition code 1 */
         cc = 1;
@@ -977,26 +977,15 @@ int      pending = 0;                   /* New interrupt pending     */
         if (dev->ccwtrace || dev->ccwstep)
         {
             psa = (PSA_3XX*)(regs->mainstor + regs->PX);
+            if (dev->ctctype == CTC_LCS)
+                WRMSG (HHC01330, "I", SSID_TO_LCSS(dev->ssid), dev->devnum);
             display_csw (dev, psa->csw);
         }
     }
     else
     {
-        /* Set cc 1 if interrupt is not pending and LCS CTC */
-        if ( dev->ctctype == CTC_LCS )
-        {
-            cc = 1;
-            store_scsw_as_csw(regs, &dev->scsw);
-            if (dev->ccwtrace)
-            {
-                psa = (PSA_3XX*)(regs->mainstor + regs->PX);
-                WRMSG (HHC01330, "I", SSID_TO_LCSS(dev->ssid), dev->devnum);
-                display_csw (dev, psa->csw);
-            }
-        }
-        else
-            /* Set condition code 0 if interrupt is pending */
-            cc = 0;
+        /* Set condition code 0 if interrupt is pending */
+        cc = 0;
     }
 
     /* Queue the interrupt */
@@ -1995,23 +1984,8 @@ adjust_thread_priority (int *newprio)
 static int
 create_device_thread ()
 {
-int     rc;                             /* Return code               */
-TID     tid;                            /* Thread ID                 */
-
-    /* Ensure correct number of ioq entries tracked */
-    {
-        register int i;
-        register DEVBLK  *ioq;
-        for (ioq = sysblk.ioq, i = 0;
-             ioq;
-             ioq = ioq->nextioq, i++);
-        sysblk.devtunavail = i;
-
-        /* If no additional work, return */
-        if (!i)
-            return 0;
-
-    }
+    int rc;                             /* Return code               */
+    TID tid;                            /* Thread ID                 */
 
     /* If work is waiting and permitted, schedule another device     */
     /* thread to handle                                              */
@@ -2023,20 +1997,22 @@ TID     tid;                            /* Thread ID                 */
         if (rc)
         {
             WRMSG (HHC00102, "E", strerror(rc));
-            return 2;
+            rc = 2;
         }
-
-        /* Update counters */
-        sysblk.devtnbr++;
-        sysblk.devtwait++;
-        if (sysblk.devtnbr > sysblk.devthwm)
-            sysblk.devthwm = sysblk.devtnbr;
+        else
+        {
+            /* Update counters */
+            sysblk.devtnbr++;
+            sysblk.devtwait++;
+            if (sysblk.devtnbr > sysblk.devthwm)
+                sysblk.devthwm = sysblk.devtnbr;
+        }
     }
 
     /* Signal possible waiting I/O threads */
     signal_condition(&sysblk.ioqcond);
 
-    return 0;
+    return (rc);
 }
 
 
