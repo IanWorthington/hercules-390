@@ -422,7 +422,9 @@ queue_io_interrupt_qlocked(IOINT* io)
 {
     DEVBLK* dev = io->dev;
     IOINT*  prev;
-    U8      priority = dev->priority;
+    int     priority = (((dev->priority << 8) |
+                         (dev->orb.csspriority)) << 8) |
+                          dev->orb.cupriority;
 
     /* If the priority for an interrupt is not -1, the interrrupt is
      * already on the queue.
