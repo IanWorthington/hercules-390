@@ -495,8 +495,27 @@ typedef int CMPFUNC(const void*, const void*);
 #define QUEUE_IO_INTERRUPT(_io) \
         queue_io_interrupt(_io)
 
+<<<<<<< HEAD
 #define QUEUE_IO_INTERRUPT_QLOCKED(_io) \
         queue_io_interrupt_qlocked(_io)
+=======
+#define QUEUE_IO_INTERRUPT_QLOCKED(_io)                               \
+ do {                                                                 \
+   IOINT *prev;                                                       \
+   for (prev = (IOINT *)&sysblk.iointq;                               \
+        prev->next != NULL                                            \
+        && prev->next != (_io)                                        \
+        && prev->next->priority >= (_io)->dev->priority;              \
+        prev = prev->next);                                           \
+   if (prev->next != (_io))                                           \
+     (_io)->next     = prev->next,                                    \
+     prev->next      = (_io),                                         \
+     (_io)->priority = (_io)->dev->priority;                          \
+   (_io)->dev->pending     = (_io)->pending     ? 1 : 0;              \
+   (_io)->dev->pcipending  = (_io)->pcipending  ? 1 : 0;              \
+   (_io)->dev->attnpending = (_io)->attnpending ? 1 : 0;              \
+ } while (0)
+>>>>>>> refs/heads/develop
 
 #define DEQUEUE_IO_INTERRUPT(_io) \
         dequeue_io_interrupt(_io)

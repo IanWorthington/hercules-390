@@ -422,9 +422,7 @@ queue_io_interrupt_qlocked(IOINT* io)
 {
     DEVBLK* dev = io->dev;
     IOINT*  prev;
-    int     priority = (((dev->priority << 8) |
-                         (dev->orb.csspriority)) << 8) |
-                          dev->orb.cupriority;
+    int     priority = dev->priority;
 
     /* If the priority for an interrupt is not -1, the interrrupt is
      * already on the queue.
@@ -451,9 +449,9 @@ queue_io_interrupt_qlocked(IOINT* io)
 
     /* Locate position in queue */
     for (prev = (IOINT*)&sysblk.iointq;
-         prev->next != NULL     &&
-            prev->next != io    &&
-            prev->next->priority > priority;
+         prev->next != NULL
+         && prev->next != io
+         && prev->next->priority > priority;
          prev = prev->next);
 
     /* Add to queue if not already queued (for example, PCI) */
@@ -468,9 +466,9 @@ queue_io_interrupt_qlocked(IOINT* io)
          * maintaining the correct number of interrupt instances on the
          * queue for a given device.
          */
-             if (io->pending)     dev->pending     = 1;
-        else if (io->pcipending)  dev->pcipending  = 1;
-        else if (io->attnpending) dev->attnpending = 1;
+        dev->pending = io->pending     ? 1 : 0;
+        dev->pending = io->pcipending  ? 1 : 0;
+        dev->pending = io->attnpending ? 1 : 0;
     }
 }
 

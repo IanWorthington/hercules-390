@@ -296,8 +296,9 @@ queue_io_interrupt_and_update_status_locked(DEVBLK* dev)
 /*  Locks Held on Return                                              */
 /*    None                                                            */
 /*  Locks Used                                                        */
-/*    sysblk.intlock                                                  */
 /*    dev->lock                                                       */
+/*    sysblk.intlock                                                  */
+/*    sysblk.iointqlk                                                 */
 /*--------------------------------------------------------------------*/
 static INLINE void
 queue_io_interrupt_and_update_status(DEVBLK* dev)
@@ -2207,20 +2208,13 @@ ScheduleIORequest ( DEVBLK *dev )
     /* Queue the I/O request */
     obtain_lock (&sysblk.ioqlock);
 
-    /* Insert the device into the I/O queue; CSS and CU priorities
-     * in DEVBLK and IOQ DEVBLK ORBs are preset to zero if not an
-     * extended ORB.
-     */
+    /* Insert the device into the I/O queue */
     for (previoq = NULL, ioq = sysblk.ioq;
          ioq != NULL &&
             /* 1. Resume                                         */
             resume >= (ioq->scsw.flag3 & SCSW3_AC_SUSP) &&
             /* 2. Subchannel priority                            */
-            dev->priority >= ioq->priority &&
-            /* 3. CSS priority                                   */
-            dev->orb.csspriority >= ioq->orb.csspriority &&
-            /* 4. CU priority                                    */
-            dev->orb.cupriority >= ioq->orb.cupriority;
+            dev->priority >= ioq->priority;
          previoq = ioq, ioq = ioq->nextioq);
     dev->nextioq = ioq;
     if (previoq != NULL)
