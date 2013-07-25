@@ -2212,7 +2212,7 @@ ScheduleIORequest ( DEVBLK *dev )
      * extended ORB.
      */
     for (previoq = NULL, ioq = sysblk.ioq;
-         ioq &&
+         ioq != NULL &&
             /* 1. Resume                                         */
             resume >= (ioq->scsw.flag3 & SCSW3_AC_SUSP) &&
             /* 2. Subchannel priority                            */
@@ -3742,6 +3742,11 @@ int     rc;                             /* Return code               */
         memcpy(&dev->orb, orb, 12);
         memset(&dev->orb.csspriority, 0, sizeof(ORB) - 12);
     }
+
+    /* Set I/O priority */
+    dev->priority &= 0x00FF0000ULL;
+    dev->priority |= dev->orb.csspriority << 8;
+    dev->priority |= dev->orb.cupriority;
 
     /* Display the start and first three words of ORB */
     if (dev->ccwtrace || dev->ccwstep)
