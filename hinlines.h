@@ -432,7 +432,7 @@ store_scsw_as_csw(const REGS* regs, const SCSW* scsw)
 /* Synchronize CPUS                                                  */
 /*                                                                   */
 /* Locks                                                             */
-/*      INTLOCK(regs)                                                */
+/*      sysblk.intlock                                               */
 /*-------------------------------------------------------------------*/
 static INLINE void
 synchronize_cpus(REGS* regs)
@@ -490,41 +490,59 @@ synchronize_cpus(REGS* regs)
      */
 }
 
+
+/*-------------------------------------------------------------------*/
+/* Wakeup CPU                                                        */
+/*                                                                   */
+/* Locks                                                             */
+/*      sysblk.intlock                                               */
+/*-------------------------------------------------------------------*/
 static INLINE void
 wakeup_cpu(REGS* regs)
 {
     signal_condition(&regs->intcond);
 }
 
+
+/*-------------------------------------------------------------------*/
+/* Wakeup first CPU via mask                                         */
+/*                                                                   */
+/* Locks                                                             */
+/*      sysblk.intlock                                               */
+/*-------------------------------------------------------------------*/
 static INLINE void
 wakeup_cpu_mask(CPU_BITMAP mask)
 {
     int i;
 
-    for (i = 0; mask; ++i)
+    for (i = 0; mask; mask >>= 1, ++i)
     {
         if (mask & 1)
         {
-            signal_condition(&sysblk.regs[i]->intcond);
+            wakeup_cpu(&sysblk.regs[i]);
             break;
         }
-
-        mask >>= 1;
     }
 }
 
+
+/*-------------------------------------------------------------------*/
+/* Wakeup all CPUs via mask                                          */
+/*                                                                   */
+/* Locks                                                             */
+/*      sysblk.intlock                                               */
+/*-------------------------------------------------------------------*/
 static INLINE void
 wakeup_cpus_mask(CPU_BITMAP mask)
 {
     int i;
 
-    for (i = 0; mask; i++)
+    for (i = 0; mask; mask >>= 1, i++)
     {
         if (mask & 1)
-            signal_condition(&sysblk.regs[i]->intcond);
-
-        mask >>= 1;
+            wakeup_cpu(&sysblk.regs[i]);
     }
 }
+
 
 #endif // _HINLINES_H
