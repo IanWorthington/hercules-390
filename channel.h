@@ -451,7 +451,7 @@ queue_io_interrupt_qlocked(IOINT* io)
     for (prev = (IOINT*)&sysblk.iointq;
          prev->next != NULL
          && prev->next != io
-         && prev->next->priority > priority;
+         && prev->next->priority >= priority;
          prev = prev->next);
 
     /* Add to queue if not already queued (for example, PCI) */
