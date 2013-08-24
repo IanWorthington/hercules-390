@@ -3704,13 +3704,13 @@ int     rc;                             /* Return code               */
 
     /* Initialize the subchannel status word */
     memset (&dev->scsw,     0, sizeof(SCSW));
-    dev->scsw.flag0 = (orb->flag4 & (ORB4_KEY   |
-                                     ORB4_S));
-    dev->scsw.flag1 = (orb->flag5 & (ORB5_F     |
-                                     ORB5_P     |
-                                     ORB5_I     |
-                                     ORB5_A     |
-                                     ORB5_U));
+    dev->scsw.flag0 = (orb->flag4 & (SCSW0_KEY |
+                                     SCSW0_S));
+    dev->scsw.flag1 = (orb->flag5 & (SCSW1_F   |
+                                     SCSW1_P   |
+                                     SCSW1_I   |
+                                     SCSW1_A   |
+                                     SCSW1_U));
 
     /* Set start pending */
     scsw_set_start_pending(&dev->scsw);
@@ -5508,7 +5508,38 @@ retry:
         }
 
         /* See if another CPU can take this interrupt */
-        WAKEUP_CPU_MASK (sysblk.waiting_mask);
+        {
+            REGS *regs;
+            CPU_BITMAP mask = sysblk.waiting_mask;
+            CPU_BITMAP wake;
+            int i;
+
+            /* If any CPUs are waiting, isolate to subgroup enabled for
+             * I/O interrupts.
+             */
+            if (mask)
+            {
+                wake = mask;
+
+                /* Turn off wake mask bits for waiting CPUs that aren't
+                 * enabled for I/O interrupts.
+                 */
+                for (i = 0; mask; mask >>= 1, ++i)
+                {
+                    if (mask & 1)
+                    {
+                        regs = sysblk.regs[i];
+                        if (!OPEN_IC_IOPENDING(regs))
+                            wake ^= regs->cpubit;
+                    }
+                }
+
+                /* Wakeup the LRU waiting CPU enabled for I/O
+                 * interrupts.
+                 */
+                WAKEUP_CPU_MASK(wake);
+            }
+        }
 
     } /* end for(io) */
 
